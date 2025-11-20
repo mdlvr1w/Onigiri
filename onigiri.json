@@ -1,0 +1,78 @@
+{
+  "profiles": [
+    {
+      "name": "dashboard-3pane",
+      "monitor": "HDMI-1",
+      "tiles": [
+        {
+          "name": "BTOP",
+          "x": 0,
+          "y": 29,
+          "width": 960,
+          "height": 1051,
+          "launch_mode": "helper",
+          "terminal_title": "BTOP",
+          "terminal_class": "btop",
+          "terminal_cmd": "btop",
+          "terminal_keep_open": true,
+          "match": {
+            "type": "class",
+            "value": "btop"
+          },
+          "no_border": true,
+          "skip_taskbar": true,
+          "command": "alacritty --class btop --title 'BTOP' -e bash -lc 'btop; exec $SHELL'",
+          "helper_terminal": "alacritty",
+          "helper_command": "btop",
+          "shell_command": "btop",
+          "terminal_app": "alacritty"
+        },
+        {
+          "name": "FASTFETCH",
+          "x": 960,
+          "y": 32,
+          "width": 960,
+          "height": 531,
+          "launch_mode": "helper",
+          "terminal_app": "alacritty",
+          "terminal_title": "FASTFETCH",
+          "terminal_class": "fastfetch",
+          "terminal_cmd": "fastfetch",
+          "terminal_keep_open": true,
+          "match": {
+            "type": "class",
+            "value": "fastfetch"
+          },
+          "no_border": true,
+          "skip_taskbar": true,
+          "command": "alacritty --class fastfetch --title 'FASTFETCH' -e bash -lc 'fastfetch; exec $SHELL'",
+          "helper_terminal": "alacritty",
+          "helper_command": "fastfetch",
+          "shell_command": "fastfetch"
+        },
+        {
+          "name": "EMPTY",
+          "x": 960,
+          "y": 560,
+          "width": 960,
+          "height": 520,
+          "no_border": true,
+          "skip_taskbar": true,
+          "launch_mode": "helper",
+          "shell_command": "",
+          "match": {
+            "type": "class",
+            "value": "empty"
+          },
+          "terminal_app": "alacritty",
+          "command": "alacritty --class empty --title 'EMPTY'"
+        }
+      ],
+      "panel_position": "top",
+      "panel_size": 29,
+      "tile_gap": 0,
+      "_last_tile_gap": 0,
+      "_last_panel_size": 29
+    }
+  ]
+}
