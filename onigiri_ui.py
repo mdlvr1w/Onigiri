@@ -952,15 +952,25 @@ class MainWindow(QWidget):
         # ---- System tray icon ----
         self._create_tray_icon()
 
-    # ----- tray -----
+      # ----- tray -----
 
     def _create_tray_icon(self) -> None:
-        self.tray_icon = QSystemTrayIcon(self)
+        from PyQt6.QtGui import QIcon
+        import os
 
-        icon = QIcon.fromTheme("preferences-system-windows")
+        # Try to load icon from system icon theme
+        icon = QIcon.fromTheme("onigiri_icon")
+
+        # Fallback for systems where theme lookup fails
         if icon.isNull():
-            icon = self.windowIcon()
-        self.tray_icon.setIcon(icon)
+            local_icon = os.path.join(os.path.dirname(__file__), "onigiri_icon.png")
+            if os.path.isfile(local_icon):
+                icon = QIcon(local_icon)
+            else:
+                # Final fallback: use window icon
+                icon = self.windowIcon()
+
+        self.tray_icon = QSystemTrayIcon(icon, self)
         self.tray_icon.setToolTip("Onigiri")
 
         menu = QMenu(self)
@@ -1551,7 +1561,6 @@ X-KDE-autostart-after=panel
         from PyQt6.QtWidgets import QInputDialog
         text, ok = QInputDialog.getText(self, title, label)
         return text, ok
-
 
 def main():
     app = QApplication(sys.argv)

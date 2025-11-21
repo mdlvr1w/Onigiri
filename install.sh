@@ -25,6 +25,16 @@ rsync -a --delete \
   --exclude "venv" \
   "$SCRIPT_DIR/" "$INSTALL_DIR/"
 
+# Install app icon if available
+ICON_SRC="$INSTALL_DIR/onigiri.png"
+ICON_DEST="$HOME/.local/share/icons/hicolor/512x512/apps/onigiri.png"
+
+if [ -f "$ICON_SRC" ]; then
+  echo "🖼️ Installing icon to $ICON_DEST"
+  mkdir -p "$(dirname "$ICON_DEST")"
+  cp "$ICON_SRC" "$ICON_DEST"
+fi
+
 # Install default JSON config if the user doesn't have one yet
 DEFAULT_JSON="$INSTALL_DIR/onigiri.json"
 TARGET_JSON="$CONFIG_DIR/onigiri.json"
@@ -83,10 +93,10 @@ cat > "$DESKTOP_FILE" <<EOF
 [Desktop Entry]
 Type=Application
 Version=1.0
-Name=Onigiri Tiler
+Name=Onigiri
 Comment=KWin tiling dashboard for KDE
 Exec=$LAUNCHER
-Icon=utilities-terminal
+Icon=onigiri
 Terminal=false
 Categories=Utility;System;
 StartupNotify=false
