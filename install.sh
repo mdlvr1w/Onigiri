@@ -6,7 +6,7 @@ APP_NAME="onigiri"
 # Where the repo is (directory of this script)
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-# Install locations (XDG-ish)
+# Install locations
 INSTALL_DIR="$HOME/.local/share/$APP_NAME"
 VENV_DIR="$INSTALL_DIR/venv"
 BIN_DIR="$HOME/.local/bin"
@@ -14,88 +14,71 @@ DESKTOP_DIR="$HOME/.local/share/applications"
 CONFIG_DIR="$HOME/.config/onigiri"
 
 echo "🔧 Installing $APP_NAME..."
+echo "  Source:   $SCRIPT_DIR"
+echo "  Install:  $INSTALL_DIR"
+echo "  Venv:     $VENV_DIR"
+echo "  Bin:      $BIN_DIR"
+echo "  Desktop:  $DESKTOP_DIR"
+
+# 1) Clean old install
+if [ -d "$INSTALL_DIR" ]; then
+  echo "⚠️  Removing existing install at $INSTALL_DIR"
+  rm -rf "$INSTALL_DIR"
+fi
 
 mkdir -p "$INSTALL_DIR" "$BIN_DIR" "$DESKTOP_DIR" "$CONFIG_DIR"
 
-echo "📁 Copying application files to $INSTALL_DIR"
-# Copy everything in your repo except venvs and git stuff
-rsync -a --delete \
-  --exclude ".git" \
-  --exclude ".venv" \
-  --exclude "venv" \
-  "$SCRIPT_DIR/" "$INSTALL_DIR/"
+# 2) Copy application files
+echo "📁 Copying application files..."
+cp "$SCRIPT_DIR/onigiri.py" "$INSTALL_DIR/"
+cp "$SCRIPT_DIR/onigiri_ui.py" "$INSTALL_DIR/"
+cp "$SCRIPT_DIR/onigiri_icon.png" "$INSTALL_DIR/" 2>/dev/null || true
+cp "$SCRIPT_DIR/README.md" "$INSTALL_DIR/" 2>/dev/null || true
+cp "$SCRIPT_DIR/onigiri.json" "$CONFIG_DIR/" 2>/dev/null || true
 
-# Install app icon if available
-ICON_SRC="$INSTALL_DIR/onigiri.png"
-ICON_DEST="$HOME/.local/share/icons/hicolor/512x512/apps/onigiri.png"
+# 3) Create virtual environment
+echo "🐍 Creating virtual environment at $VENV_DIR..."
+python3 -m venv "$VENV_DIR"
 
-if [ -f "$ICON_SRC" ]; then
-  echo "🖼️ Installing icon to $ICON_DEST"
-  mkdir -p "$(dirname "$ICON_DEST")"
-  cp "$ICON_SRC" "$ICON_DEST"
-fi
+# 4) Install dependencies into venv
+echo "📦 Installing Python dependencies into venv..."
+"$VENV_DIR/bin/pip" install --upgrade pip
 
-# Install default JSON config if the user doesn't have one yet
-DEFAULT_JSON="$INSTALL_DIR/onigiri.json"
-TARGET_JSON="$CONFIG_DIR/onigiri.json"
-
-if [ ! -f "$TARGET_JSON" ] && [ -f "$DEFAULT_JSON" ]; then
-  echo "📝 No existing config found, installing default profile to $TARGET_JSON"
-  cp "$DEFAULT_JSON" "$TARGET_JSON"
-fi
-
-# Create venv
-if [ ! -d "$VENV_DIR" ]; then
-  echo "🐍 Creating virtual environment in $VENV_DIR"
-  python3 -m venv "$VENV_DIR"
-fi
-
-echo "📦 Installing Python dependencies into venv"
-source "$VENV_DIR/bin/activate"
-
-if [ -f "$INSTALL_DIR/requirements.txt" ]; then
-  pip install --upgrade pip
-  pip install -r "$INSTALL_DIR/requirements.txt"
+# IMPORTANT: look for requirements.txt in the SOURCE dir, not INSTALL dir
+if [ -f "$SCRIPT_DIR/requirements.txt" ]; then
+  echo "📄 Using requirements.txt from $SCRIPT_DIR"
+  "$VENV_DIR/bin/pip" install -r "$SCRIPT_DIR/requirements.txt"
 else
-  echo "⚠️  requirements.txt not found in $INSTALL_DIR – skipping pip install."
+  echo "⚠️  requirements.txt not found in $SCRIPT_DIR – installing PyQt6 directly."
+  "$VENV_DIR/bin/pip" install PyQt6
 fi
 
-deactivate
-
-# Launcher script
+# 5) Create launcher script in ~/.local/bin
 LAUNCHER="$BIN_DIR/$APP_NAME"
-
-echo "🚀 Creating launcher script at $LAUNCHER"
+echo "🚀 Creating launcher at $LAUNCHER"
 
 cat > "$LAUNCHER" <<EOF
 #!/usr/bin/env bash
-APP_DIR="\$HOME/.local/share/$APP_NAME"
-VENV_DIR="\$APP_DIR/venv"
+# Auto-generated launcher for $APP_NAME
+VENV="$VENV_DIR"
+APP_DIR="$INSTALL_DIR"
 
-if [ ! -d "\$VENV_DIR" ]; then
-  echo "$APP_NAME: venv not found at \$VENV_DIR"
-  exit 1
-fi
-
-source "\$VENV_DIR/bin/activate"
-
-# Launch the UI (change to onigiri.py if you prefer CLI)
-exec python "\$APP_DIR/onigiri_ui.py" "\$@"
+exec "\$VENV/bin/python" "\$APP_DIR/onigiri_ui.py" "\$@"
 EOF
 
 chmod +x "$LAUNCHER"
 
-# Desktop entry
-DESKTOP_FILE="$DESKTOP_DIR/$APP_NAME.desktop"
-echo "🖥️  Creating desktop entry at $DESKTOP_FILE"
+# 6) Create .desktop file for KDE / desktops
+DESKTOP_FILE="$DESKTOP_DIR/onigiri.desktop"
+echo "🖥  Creating desktop entry at $DESKTOP_FILE"
 
 cat > "$DESKTOP_FILE" <<EOF
 [Desktop Entry]
 Type=Application
-Version=1.0
 Name=Onigiri
-Comment=KWin tiling dashboard for KDE
-Exec=$LAUNCHER
+GenericName=KWin Rice Helper
+Comment=Define and launch KWin tiling profiles
+Exec=$APP_NAME
 Icon=onigiri
 Terminal=false
 Categories=Utility;System;
@@ -106,7 +89,7 @@ chmod +x "$DESKTOP_FILE"
 
 echo
 echo "✅ Installation complete."
-
+echo
 echo "➡  You can now run it via:"
 echo "   $APP_NAME"
-echo "   (or find 'Onigiri Tiler' in your application launcher)"
+echo "   (or find 'Onigiri' in your application launcher)"
