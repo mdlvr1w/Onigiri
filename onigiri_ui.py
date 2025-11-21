@@ -959,11 +959,11 @@ class MainWindow(QWidget):
         import os
 
         # Try to load icon from system icon theme
-        icon = QIcon.fromTheme("onigiri_icon")
+        icon = QIcon.fromTheme("onigiri")
 
         # Fallback for systems where theme lookup fails
         if icon.isNull():
-            local_icon = os.path.join(os.path.dirname(__file__), "onigiri_icon.png")
+            local_icon = os.path.join(os.path.dirname(__file__), "onigiri.png")
             if os.path.isfile(local_icon):
                 icon = QIcon(local_icon)
             else:
