@@ -823,6 +823,8 @@ class MainWindow(QWidget):
     def __init__(self):
         super().__init__()
 
+        self.setWindowIcon(self.geticon())
+
         self.setWindowTitle("Onigiri")
         self.resize(1400, 750)
 
@@ -953,8 +955,7 @@ class MainWindow(QWidget):
         self._create_tray_icon()
 
       # ----- tray -----
-
-    def _create_tray_icon(self) -> None:
+    def geticon(self):
         from PyQt6.QtGui import QIcon
         import os
 
@@ -969,7 +970,10 @@ class MainWindow(QWidget):
             else:
                 # Final fallback: use window icon
                 icon = self.windowIcon()
+        return icon
 
+    def _create_tray_icon(self) -> None:
+        icon = self.geticon()
         self.tray_icon = QSystemTrayIcon(icon, self)
         self.tray_icon.setToolTip("Onigiri")
 
