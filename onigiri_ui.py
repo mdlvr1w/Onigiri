@@ -964,7 +964,7 @@ class MainWindow(QWidget):
 
         # Fallback for systems where theme lookup fails
         if icon.isNull():
-            local_icon = os.path.join(os.path.dirname(__file__), "onigiri.png")
+            local_icon = os.path.join(os.path.dirname(__file__), "onigiri_icon.png")
             if os.path.isfile(local_icon):
                 icon = QIcon(local_icon)
             else:
