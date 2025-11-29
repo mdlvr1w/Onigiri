@@ -7,6 +7,10 @@ import configparser
 from typing import Dict, Any, List, Optional
 from uuid import uuid4
 import time
+import re
+import logging
+
+logger = logging.getLogger(__name__)
 
 # Application config storage
 CONFIG_DIR = Path.home() / ".config" / "onigiri"
@@ -156,6 +160,72 @@ def _trigger_kwin_reconfigure() -> None:
             stderr=subprocess.DEVNULL,
         )
 
+def _get_xrandr_monitors():
+    """
+    Use 'xrandr --query' to get monitor layouts.
+
+    Returns a dict:
+        {
+          "HDMI-0": {"width": 1920, "height": 1080, "x": 0, "y": 0},
+          "DP-0":   {"width": 2560, "height": 1440, "x": 1920, "y": 0},
+          ...
+        }
+    """
+    monitors: Dict[str, Dict[str, int]] = {}
+
+    try:
+        result = subprocess.run(
+            ["xrandr", "--query"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=True,
+        )
+    except Exception:
+        # If xrandr is not available or fails, just return empty.
+        return monitors
+
+    for line in result.stdout.splitlines():
+        # We only care about connected outputs
+        if " connected" not in line:
+            continue
+
+        parts = line.split()
+        if not parts:
+            continue
+
+        name = parts[0]
+
+        # Look for patterns like "1920x1080+0+0" or "2560x1440+1920+0"
+        m = re.search(r"(\d+)x(\d+)\+(-?\d+)\+(-?\d+)", line)
+        if not m:
+            continue
+
+        width = int(m.group(1))
+        height = int(m.group(2))
+        x = int(m.group(3))
+        y = int(m.group(4))
+
+        monitors[name] = {"width": width, "height": height, "x": x, "y": y}
+
+    return monitors
+
+
+def _get_monitor_offset(monitor_name: str):
+    """
+    Return (x, y) offset for a given monitor name from xrandr.
+    If not found, return (0, 0).
+    """
+    if not monitor_name or monitor_name == "default":
+        return 0, 0
+
+    monitors = _get_xrandr_monitors()
+    info = monitors.get(monitor_name)
+    if not info:
+        return 0, 0
+
+    return int(info["x"]), int(info["y"])
+
 
 class KWinRulesManager:
     """Wrapper around kwinrulesrc with higher-level operations."""
@@ -277,7 +347,7 @@ class KWinRulesManager:
                 "wmclass": sec.get("wmclass", ""),
                 "title": sec.get("title", ""),
                 "enabled": enabled,
-                "from_kwintiler": desc.startswith("KWinTiler:"),
+                "from_kwintiler": desc.startswith("KWinTiler:") or desc.startswith("Onigiri:"),
             }
             result.append(entry)
 
@@ -300,13 +370,40 @@ class KWinRulesManager:
         else:
             cfg.set(rule_id, "Enabled", "false")
 
+        logger.info("Set rule '%s' enabled=%s", rule_id, enabled)
+        self.save_config(cfg)
+        _trigger_kwin_reconfigure()
+
+    def delete_rule(self, rule_id: str) -> None:
+        """
+        Permanently remove a single KWin rule (section) by ID.
+
+        This removes the rule section itself and also cleans up the
+        [General].rules list and count, then triggers a KWin reload.
+        """
+        cfg = self.load_config()
+
+        if not cfg.has_section(rule_id):
+            logger.info("Rule '%s' does not exist; nothing to delete.", rule_id)
+            return
+
+        # Remove the rule section itself
+        cfg.remove_section(rule_id)
+
+        # Remove from [General].rules list
+        current_ids = self._get_rules_list(cfg)
+        filtered = [rid for rid in current_ids if rid != rule_id]
+        self._set_rules_list(cfg, filtered)
+
+        logger.info("Deleted KWin rule '%s'", rule_id)
         self.save_config(cfg)
         _trigger_kwin_reconfigure()
 
     def remove_profile_rules(self, profile_name: str) -> None:
         """Remove all KWin Window Rules created for a given profile."""
         cfg = self.load_config()
-        prefix = f"KWinTiler:{profile_name}:"
+        legacy_prefix = f"KWinTiler:{profile_name}:"
+        new_prefix = f"Onigiri:{profile_name}:"
 
         rules_list = self._get_rules_list(cfg)
         to_remove_ids: List[str] = []
@@ -314,9 +411,12 @@ class KWinRulesManager:
         for section in cfg.sections():
             if section == "General":
                 continue
-            if cfg.has_option(section, "Description"):
-                if cfg.get(section, "Description").startswith(prefix):
-                    to_remove_ids.append(section)
+            if not cfg.has_option(section, "Description"):
+                continue
+
+            desc = cfg.get(section, "Description")
+            if desc.startswith(legacy_prefix) or desc.startswith(new_prefix):
+                to_remove_ids.append(section)
 
         if to_remove_ids:
             rules_list = [r for r in rules_list if r not in to_remove_ids]
@@ -342,12 +442,20 @@ class OnigiriEngine:
         Write/update KWin Window Rules for a profile.
         Does NOT launch any applications – pure rules.
         """
-        #print(f"[OnigiriEngine] apply_profile called for '{name}'")
+        logger.info("Applying KWin rules for profile '%s'", name)
+
         profile = self._store.load_profile(name)
         if not profile.tiles:
+            logger.info("Profile '%s' has no tiles; nothing to apply.", name)
             return
 
         cfg = self._rules.load_config()
+
+        # Determine the monitor offset (for multi-monitor setups)
+        monitor_offset_x = 0
+        monitor_offset_y = 0
+        if profile.monitor and profile.monitor != "default":
+            monitor_offset_x, monitor_offset_y = _get_monitor_offset(profile.monitor)
 
         for tile in profile.tiles:
             if not tile.has_valid_match():
@@ -357,8 +465,10 @@ class OnigiriEngine:
             desc = f"KWinTiler:{profile.name}:{tile.name}"
             sec = self._rules.ensure_rule_section(cfg, desc)
 
-            x = int(tile.x)
-            y = int(tile.y)
+            # Tile coordinates are stored relative to the selected monitor.
+            # To place them in the global desktop, we add the monitor's x/y offset.
+            x = int(tile.x) + monitor_offset_x
+            y = int(tile.y) + monitor_offset_y
             w = int(tile.width)
             h = int(tile.height)
 
@@ -408,14 +518,18 @@ class OnigiriEngine:
 
     def launch_profile_commands(self, name: str) -> None:
         """Launch all commands for a profile (open its windows) and re-trigger rules."""
+        logger.info("Launching commands for profile '%s'", name)
+
         profile = self._store.load_profile(name)
         if not profile.tiles:
+            logger.info("Profile '%s' has no tiles; nothing to launch.", name)
             return
 
         # Launch all windows
         for tile in profile.tiles:
             cmd = tile.command
             if cmd:
+                logger.info("Launching command for tile '%s': %s", tile.name, cmd)
                 subprocess.Popen(cmd, shell=True)
 
         # Give KWin a moment so the windows are mapped and titles/classes are set
@@ -424,9 +538,23 @@ class OnigiriEngine:
         # Now poke KWin so it re-reads rules and re-applies them to existing windows
         _trigger_kwin_reconfigure()
 
-    def remove_profile_rules(self, name: str) -> None:
-        """Delete rules belonging to a given profile."""
-        self._rules.remove_profile_rules(name)
+    def remove_profile_rules(self, profile) -> None:
+        """
+        Remove all KWin rules associated with the given profile.
+
+        Accepts either:
+        - a profile name string, or
+        - a Profile instance.
+        """
+        # Support both string and Profile object for safety
+        try:
+            # If it's a dataclass Profile, use its name
+            profile_name = profile.name  # type: ignore[attr-defined]
+        except AttributeError:
+            # Otherwise assume it's already a name (string-like)
+            profile_name = str(profile)
+
+        self._rules.remove_profile_rules(profile_name)
 
 
 # ======================= Module-level façade (public API) =======================
@@ -470,6 +598,10 @@ def list_kwin_rules() -> List[Dict[str, Any]]:
 
 def set_rule_enabled(rule_id: str, enabled: bool) -> None:
     _kwin_rules.set_rule_enabled(rule_id, enabled)
+
+
+def delete_kwin_rule(rule_id: str) -> None:
+    _kwin_rules.delete_rule(rule_id)
 
 
 def apply_profile(name: str) -> None:
@@ -536,7 +668,7 @@ def example_config() -> None:
         ]
     }
     save_profiles(data)
-    print(f"Wrote example config to {TILER_CONFIG}")
+    logger.info("Wrote example config to %s", TILER_CONFIG)
 
 
 # ======================= CLI entry point =======================
@@ -544,6 +676,11 @@ def example_config() -> None:
 
 if __name__ == "__main__":
     import argparse
+
+    logging.basicConfig(
+        level=logging.INFO,
+        format="[%(levelname)s] %(name)s: %(message)s",
+    )
 
     ap = argparse.ArgumentParser(description="KWin tiler profile tool (Onigiri backend)")
     ap.add_argument(
