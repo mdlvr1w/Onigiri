@@ -811,7 +811,8 @@ class LayoutCanvas(QWidget):
 
     def _recompute_transform(self) -> None:
         """
-        Compute scale and offset so that the whole screen fits into the canvas.
+        Compute scale and offset so that the whole screen fits into the canvas,
+        using the entire widget area (no extra margins).
         """
         screen_w, screen_h = self._compute_screen_bbox()
         rect = self.rect()
@@ -821,9 +822,9 @@ class LayoutCanvas(QWidget):
             self._offset_y = 0.0
             return
 
-        margin = 20
-        available_w = max(rect.width() - margin * 2, 1)
-        available_h = max(rect.height() - margin * 2, 1)
+        # Use full widget space, no outer margin
+        available_w = max(rect.width(), 1)
+        available_h = max(rect.height(), 1)
 
         sx = available_w / float(screen_w)
         sy = available_h / float(screen_h)
@@ -832,6 +833,8 @@ class LayoutCanvas(QWidget):
         canvas_w = screen_w * self._scale
         canvas_h = screen_h * self._scale
 
+        # Center the screen inside the widget (no extra padding beyond
+        # what comes from aspect ratio differences)
         self._offset_x = (rect.width() - canvas_w) / 2.0
         self._offset_y = (rect.height() - canvas_h) / 2.0
 
@@ -2078,22 +2081,28 @@ class TileEditor(QWidget):
         cmd = self.shell_command_edit.text().strip() or ""
 
         tile_name = self.name_edit.text().strip() or "Dash Tile"
-        wm_class = tile_name.lower().replace(" ", "-")
 
-        # Always keep match in sync for helper mode
-        self.match_type_combo.setCurrentText("class")
-        self.match_value_edit.setText(wm_class)
-
-
+        # Build terminal command with proper window title flags
         if terminal == "alacritty":
             if cmd:
                 built = (
-                    f"{terminal} --class {wm_class} --title '{tile_name}' "
+                    f"{terminal} --title '{tile_name}' "
                     f"-e bash -lc '{cmd}; exec $SHELL'"
                 )
             else:
-                built = f"{terminal} --class {wm_class} --title '{tile_name}'"
+                built = f"{terminal} --title '{tile_name}'"
+
+        elif terminal == "kitty":
+            if cmd:
+                built = (
+                    f"{terminal} --title '{tile_name}' "
+                    f"-e bash -lc '{cmd}; exec $SHELL'"
+                )
+            else:
+                built = f"{terminal} --title '{tile_name}'"
+
         elif terminal == "konsole":
+            # tabtitle usually appears in the window title
             if cmd:
                 built = (
                     f"{terminal} --new-tab --hold -p tabtitle='{tile_name}' "
@@ -2101,13 +2110,29 @@ class TileEditor(QWidget):
                 )
             else:
                 built = f"{terminal} --new-tab -p tabtitle='{tile_name}'"
+
+        elif terminal == "xterm":
+            if cmd:
+                built = (
+                    f"{terminal} -T '{tile_name}' "
+                    f"-e bash -lc '{cmd}; exec $SHELL'"
+                )
+            else:
+                built = f"{terminal} -T '{tile_name}'"
+
         else:
+            # Fallback: unknown terminal, just run the command
             if cmd:
                 built = f"{terminal} -e bash -lc '{cmd}; exec $SHELL'"
             else:
                 built = terminal
 
+        # In helper mode, we MATCH BY TITLE now (the real logic lives in apply_changes)
+        self.match_type_combo.setCurrentText("title")
+        self.match_value_edit.setText(tile_name)
+
         self.command_edit.setPlainText(built)
+
 
     def _update_command_from_app(self) -> None:
         """
@@ -2305,12 +2330,11 @@ class TileEditor(QWidget):
         tile_name = t.name or "Dash Tile"
 
         if mode_text == "Terminal helper":
-            # Use a stable WM_CLASS derived from the tile name
-            wm_class = tile_name.lower().replace(" ", "-")
-            t.set_match("class", wm_class)
-            # Keep hidden widgets in sync (for consistency / future)
-            self.match_type_combo.setCurrentText("class")
-            self.match_value_edit.setText(wm_class)
+            # Match helper terminals by WINDOW TITLE substring using the tile name.
+            # This works across different terminals (kitty, konsole, alacritty, xterm...)
+            t.set_match("title", tile_name)
+            self.match_type_combo.setCurrentText("title")
+            self.match_value_edit.setText(tile_name)
 
         elif mode_text == "Application":
             # Use the application name as a substring match on window title
@@ -2426,7 +2450,46 @@ class MainWindow(QWidget):
 
         self.setWindowIcon(self.geticon())
         self.setWindowTitle("Onigiri")
-        self.resize(1400, 750)
+        # Give the UI more space so the canvas can actually breathe
+        self.resize(1700, 900)
+
+        # Simple dark-grey theme for the whole app
+        self.setStyleSheet("""
+            QWidget {
+                background-color: #222222;
+                color: #f0f0f0;
+            }
+
+            QGroupBox {
+                border: 1px solid #444444;
+                border-radius: 6px;
+                margin-top: 10px;
+            }
+            QGroupBox::title {
+                subcontrol-origin: margin;
+                left: 8px;
+                padding: 0 4px 0 4px;
+            }
+
+            QPushButton {
+                background-color: #333333;
+                border: 1px solid #555555;
+                border-radius: 6px;
+                padding: 4px 10px;
+            }
+            QPushButton:hover {
+                background-color: #3f3f3f;
+            }
+            QPushButton:pressed {
+                background-color: #292929;
+            }
+
+            QListWidget, QComboBox, QSpinBox, QLineEdit, QTextEdit {
+                background-color: #2a2a2a;
+                border: 1px solid #555555;
+                border-radius: 4px;
+            }
+        """)
 
         # Engine service and config
         self.engine = OnigiriService()
@@ -2450,7 +2513,7 @@ class MainWindow(QWidget):
         self._loading_profile_settings: bool = False
 
         # === Widgets ===
-        main_layout = QHBoxLayout(self)
+        # main_layout = QHBoxLayout(self)
 
         # Left: profiles list
         self.profile_list = QListWidget()
@@ -2479,6 +2542,9 @@ class MainWindow(QWidget):
         # Bottom canvas (profile designer)
         self.canvas = LayoutCanvas()
 
+        # Make sure the canvas asks for more vertical space
+        self.canvas.setMinimumHeight(450)
+
         # Button to load a background image for the canvas
         self.btn_canvas_bg = QPushButton("Load Canvas Background")
         self.btn_canvas_bg.setToolTip("Pick an image (e.g. a desktop screenshot) as canvas background")
@@ -2496,6 +2562,16 @@ class MainWindow(QWidget):
         self.layout_combo = QComboBox()
         self.layout_combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToContents)
         self.layout_combo.setToolTip("Select a named layout for this profile and monitor.")
+
+        # Top-bar profile selector (separate from the hidden list)
+        self.profile_combo = QComboBox()
+        self.profile_combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToContents)
+        self.profile_combo.setToolTip("Select the active profile.")
+
+        # Buttons to open detail dialogs
+        self.btn_open_profiles = QPushButton("Edit Profiles…")
+        self.btn_open_tiles = QPushButton("Edit Tiles…")
+        self.btn_open_rules = QPushButton("KWin Rules…")
 
         # Layout editor buttons
         self.btn_edit_layout = QPushButton("Edit Layout")
@@ -2544,52 +2620,49 @@ class MainWindow(QWidget):
         button_layout.addWidget(self.btn_launch)
         button_layout.addWidget(self.btn_autostart)
 
-        # Assemble main layout
+        # Assemble main layout (new dashboard-style UI)
 
-        # --- Group: Profiles ---
-        profiles_group = QGroupBox("Profiles")
-        profiles_group_layout = QVBoxLayout()
-        profiles_group_layout.addWidget(self.profile_list)
+        main_layout = QVBoxLayout(self)
+        main_layout.setContentsMargins(16, 16, 16, 16)
+        main_layout.setSpacing(10)
 
-        profile_buttons_row = QHBoxLayout()
-        profile_buttons_row.addWidget(self.btn_new_profile)
-        profile_buttons_row.addWidget(self.btn_rename_profile)
-        profile_buttons_row.addWidget(self.btn_delete_profile)
-        profile_buttons_row.addStretch()
-        profiles_group_layout.addLayout(profile_buttons_row)
-        profiles_group.setLayout(profiles_group_layout)
+        # --- Top bar: title + profile selector + dialog shortcuts ---
+        top_bar = QHBoxLayout()
 
-        # --- Group: Tiles in current profile ---
-        tiles_group = QGroupBox("Tiles in Profile")
-        tiles_group_layout = QVBoxLayout()
-        tiles_group_layout.addWidget(self.tile_list)
+        # Logo + Title (tight spacing)
+        logo_label = QLabel()
 
-        tile_buttons_row = QHBoxLayout()
-        tile_buttons_row.addWidget(self.btn_new_tile)
-        tile_buttons_row.addWidget(self.btn_delete_tile)
-        tile_buttons_row.addStretch()
-        tiles_group_layout.addLayout(tile_buttons_row)
-        tiles_group.setLayout(tiles_group_layout)
+        icon = self.geticon()
+        pix = icon.pixmap(64, 64)
+        logo_label.setPixmap(pix)
+        logo_label.setAlignment(Qt.AlignmentFlag.AlignVCenter)
 
-        # --- Group: KWin rules ---
-        rules_group = QGroupBox("KWin Rules (enabled/disabled)")
-        rules_group_layout = QVBoxLayout()
-        rules_group_layout.addWidget(self.rules_list)
+        title_label = QLabel("Onigiri")
+        title_label.setStyleSheet("font-size: 18px; font-weight: 600;")
+        title_label.setAlignment(Qt.AlignmentFlag.AlignVCenter)
 
-        rules_buttons_row = QHBoxLayout()
-        rules_buttons_row.addWidget(self.btn_delete_rule)
-        rules_buttons_row.addStretch()
-        rules_group_layout.addLayout(rules_buttons_row)
+        # Add logo + text RIGHT next to each other (no spacing)
+        top_bar.addWidget(logo_label)
+        top_bar.addWidget(title_label)
 
-        rules_group.setLayout(rules_group_layout)
+        # Add a tiny gap only AFTER the pair (to separate from the rest)
+        top_bar.addSpacing(4)
 
-        # Top row: profiles / tiles / rules side by side
-        lists_layout = QHBoxLayout()
-        lists_layout.addWidget(profiles_group)
-        lists_layout.addWidget(tiles_group)
-        lists_layout.addWidget(rules_group)
+        top_bar.addStretch(1)
 
-        # Profile settings row (gap + monitor + layout)
+        # Profile selector
+        top_bar.addWidget(QLabel("Profile:"))
+        top_bar.addWidget(self.profile_combo)
+
+        # Dialog buttons
+        top_bar.addSpacing(12)
+        top_bar.addWidget(self.btn_open_profiles)
+        top_bar.addWidget(self.btn_open_tiles)
+        top_bar.addWidget(self.btn_open_rules)
+
+        main_layout.addLayout(top_bar)
+
+        # --- Row: profile settings (gap + monitor + layout) ---
         profile_settings_layout = QHBoxLayout()
 
         # Gap
@@ -2615,27 +2688,23 @@ class MainWindow(QWidget):
         profile_settings_layout.addWidget(self.btn_load_layout)
         profile_settings_layout.addWidget(self.btn_delete_layout)
 
-        profile_settings_layout.addStretch()
+        profile_settings_layout.addStretch(1)
+        main_layout.addLayout(profile_settings_layout)
 
-        side_layout = QVBoxLayout()
-        side_layout.addLayout(lists_layout)
-        side_layout.addLayout(profile_settings_layout)
-        side_layout.addWidget(QLabel("Profile Designer"))
+        # --- Canvas card: background button + canvas ---
+        canvas_block = QVBoxLayout()
 
-        # Small row above the canvas with the background button on the right
         bg_button_row = QHBoxLayout()
         bg_button_row.addStretch(1)
         bg_button_row.addWidget(self.btn_canvas_bg)
-        side_layout.addLayout(bg_button_row)
 
-        # Canvas itself takes the remaining vertical space
-        side_layout.addWidget(self.canvas, stretch=1)
+        canvas_block.addLayout(bg_button_row)
+        canvas_block.addWidget(self.canvas, stretch=1)
 
-        # Bottom global action row
-        side_layout.addLayout(button_layout)
+        main_layout.addLayout(canvas_block, stretch=1)
 
-        main_layout.addLayout(side_layout, stretch=2)
-        main_layout.addWidget(self.tile_editor, stretch=1)
+        # --- Bottom action row (undo/redo/save/apply/launch/autostart) ---
+        main_layout.addLayout(button_layout)
 
         self.setLayout(main_layout)
 
@@ -2656,6 +2725,7 @@ class MainWindow(QWidget):
         self.btn_launch.clicked.connect(self.on_launch_apps)
         self.btn_autostart.clicked.connect(self.on_create_autostart)
         self.btn_canvas_bg.clicked.connect(self.on_load_canvas_background)
+        self.profile_combo.currentIndexChanged.connect(self.on_profile_combo_changed)
 
         # Profile settings changes (gap + monitor + layout)
         self._init_monitor_list()
@@ -2670,6 +2740,9 @@ class MainWindow(QWidget):
         self.btn_save_layout.clicked.connect(self.on_save_layout)
         self.btn_load_layout.clicked.connect(self.on_load_layout)
         self.btn_delete_layout.clicked.connect(self.on_delete_layout)
+        self.btn_open_profiles.clicked.connect(self.show_profiles_dialog)
+        self.btn_open_tiles.clicked.connect(self.show_tiles_dialog)
+        self.btn_open_rules.clicked.connect(self.show_rules_dialog)
 
         # Canvas signals
         self.canvas.tileSelected.connect(self.on_canvas_tile_selected)
@@ -2753,6 +2826,29 @@ class MainWindow(QWidget):
             super().closeEvent(event)
 
     # ----- Data helpers -----
+
+    def show_profiles_dialog(self) -> None:
+        if not hasattr(self, "_profiles_dialog"):
+            self._profiles_dialog = ProfilesDialog(self)
+        self._profiles_dialog.show()
+        self._profiles_dialog.raise_()
+        self._profiles_dialog.activateWindow()
+
+    def show_tiles_dialog(self) -> None:
+        if not hasattr(self, "_tiles_dialog"):
+            self._tiles_dialog = TilesDialog(self)
+        self._tiles_dialog.show()
+        self._tiles_dialog.raise_()
+        self._tiles_dialog.activateWindow()
+
+    def show_rules_dialog(self) -> None:
+        if not hasattr(self, "_rules_dialog"):
+            self._rules_dialog = KWinRulesDialog(self)
+        # Always refresh rules before showing
+        self.populate_system_rules()
+        self._rules_dialog.show()
+        self._rules_dialog.raise_()
+        self._rules_dialog.activateWindow()
 
     def _init_monitor_list(self) -> None:
         """
@@ -2863,11 +2959,26 @@ class MainWindow(QWidget):
 
     def populate_profiles(self) -> None:
         self.profile_list.clear()
+
+        # Also keep the top-bar combo in sync
+        if hasattr(self, "profile_combo"):
+            self.profile_combo.blockSignals(True)
+            self.profile_combo.clear()
+
         for idx, profile in enumerate(self.get_profiles()):
             display_name = profile.name or "<unnamed>"
+
+            # Hidden list (logic driver)
             item = QListWidgetItem(display_name)
             item.setData(Qt.ItemDataRole.UserRole, idx)
             self.profile_list.addItem(item)
+
+            # Top-bar combo (visual selector)
+            if hasattr(self, "profile_combo"):
+                self.profile_combo.addItem(display_name, idx)
+
+        if hasattr(self, "profile_combo"):
+            self.profile_combo.blockSignals(False)
 
     def populate_tiles(self, profile_index: Optional[int]) -> None:
         self.tile_list.clear()
@@ -3293,33 +3404,11 @@ class MainWindow(QWidget):
 
     def _apply_tile_gap_delta(self, profile: ProfileModel, old_gap: int, new_gap: int) -> None:
         """
-        Adjust all tiles' geometry when the tile gap changes.
+        Legacy helper for gap changes.
+        Geometry is now recalculated by LayoutCanvas._push_geometry_into_tiles(),
+        so this function is intentionally empty.
         """
-        delta = new_gap - old_gap
-        if delta == 0:
-            return
-
-        for t in profile.tiles:
-            x = int(t.x)
-            y = int(t.y)
-            w = int(t.width)
-            h = int(t.height)
-
-            # Move tile
-            new_x = x + delta
-            new_y = y + delta
-
-            # Shrink/expand tile
-            new_w = w - 2 * delta
-            new_h = h - 2 * delta
-
-            # Avoid degenerate sizes
-            if new_w < 1:
-                new_w = 1
-            if new_h < 1:
-                new_h = 1
-
-            t.set_geometry(int(new_x), int(new_y), int(new_w), int(new_h))
+        return
 
     # ----- Slots -----
 
@@ -3330,6 +3419,12 @@ class MainWindow(QWidget):
             self.current_profile_index = None
             self._clear_tile_selection_and_editor()
             self.load_profile_settings_to_ui(None)
+
+            # Keep combo in sync
+            if hasattr(self, "profile_combo"):
+                self.profile_combo.blockSignals(True)
+                self.profile_combo.setCurrentIndex(-1)
+                self.profile_combo.blockSignals(False)
             return
 
         profile_index = int(current.data(Qt.ItemDataRole.UserRole))
@@ -3343,6 +3438,12 @@ class MainWindow(QWidget):
 
         if self.tile_list.count() > 0:
             self.tile_list.setCurrentRow(0)
+
+        # Sync top-bar combo with the new index
+        if hasattr(self, "profile_combo") and 0 <= profile_index < self.profile_combo.count():
+            self.profile_combo.blockSignals(True)
+            self.profile_combo.setCurrentIndex(profile_index)
+            self.profile_combo.blockSignals(False)
 
     def on_undo(self) -> None:
         """
@@ -3480,16 +3581,25 @@ class MainWindow(QWidget):
 
         gap = int(self.tile_gap_spin.value())
 
-        # Previous value (for delta calculation)
+        # Previous value (for comparison / UI memory)
         old_gap = int(profile.last_tile_gap)
 
         # Update profile fields
         profile.tile_gap = gap
 
-        # Adjust geometry for gap change
         if gap != old_gap:
-            self._apply_tile_gap_delta(profile, old_gap, gap)
+            # Remember last used gap
             profile.last_tile_gap = gap
+
+            # Rebuild the canvas with the current layout_slots and new gap
+            self.canvas.set_profile(profile)
+
+            # Apply the gap to all tile geometries
+            if hasattr(self.canvas, "_push_geometry_into_tiles"):
+                self.canvas._push_geometry_into_tiles()
+        else:
+            # No change, just ensure canvas shows current profile
+            self.canvas.set_profile(profile)
 
         # If we're editing a tile, refresh its fields in the editor
         if self.current_tile_index is not None:
@@ -3497,8 +3607,8 @@ class MainWindow(QWidget):
             if tile is not None:
                 self.tile_editor.load_tile(profile, tile)
 
-        # Refresh canvas to show new geometry + gap
-        self.canvas.set_profile(profile)
+        # Finally, repaint the canvas
+        self.canvas.update()
 
     # ----- Layout editor buttons -----
 
@@ -3531,27 +3641,13 @@ class MainWindow(QWidget):
         slots = self.canvas.export_slots_for_profile()
         profile.layout_slots = slots
 
-        # Push geometry into tiles based on slot rectangles
-        tiles = profile.tiles
-        for slot in slots:
-            name = slot.get("tile_name") or ""
-            if not name:
-                continue
-            # find tile by name
-            tile_idx = None
-            for i, t in enumerate(tiles):
-                if t.name == name:
-                    tile_idx = i
-                    break
-            if tile_idx is None:
-                continue
-
-            t = tiles[tile_idx]
-            x = int(slot.get("x", 0))
-            y = int(slot.get("y", 0))
-            w = int(slot.get("w", 0))
-            h = int(slot.get("h", 0))
-            t.set_geometry(x, y, w, h)
+        # Let the canvas apply the current gap setting to all tiles.
+        # This uses the split tree + profile.tile_gap to compute
+        # the final geometry, so you get:
+        # - 'gap' pixels between tiles
+        # - 'gap' pixels between tiles and screen edges.
+        if hasattr(self.canvas, "_push_geometry_into_tiles"):
+            self.canvas._push_geometry_into_tiles()
 
         # Canvas already reflects the current layout; just refresh tile editor
         if self.current_tile_index is not None:
@@ -3706,6 +3802,15 @@ class MainWindow(QWidget):
 
         # Canvas already has the updated geometry; just repaint
         self.canvas.update()
+
+    def on_profile_combo_changed(self, index: int) -> None:
+        """
+        When the user picks a profile in the top-bar combo, drive the hidden
+        profile_list selection (which already updates everything else).
+        """
+        if index < 0 or index >= self.profile_list.count():
+            return
+        self.profile_list.setCurrentRow(index)
 
     def flush_tile_edits(self, item: Optional[QListWidgetItem] = None) -> None:
         """
@@ -4195,6 +4300,100 @@ def main() -> int:
     win.hide()
     return app.exec()
 
+class ProfilesDialog(QDialog):
+    def __init__(self, main: "MainWindow"):
+        super().__init__(main)
+        self.main = main
+        self.setWindowTitle("Profiles")
+        self.setModal(False)
+        self.resize(500, 400)
+
+        layout = QVBoxLayout(self)
+
+        group = QGroupBox("Profiles")
+        g_layout = QVBoxLayout()
+        g_layout.addWidget(self.main.profile_list)
+
+        buttons_row = QHBoxLayout()
+        buttons_row.addWidget(self.main.btn_new_profile)
+        buttons_row.addWidget(self.main.btn_rename_profile)
+        buttons_row.addWidget(self.main.btn_delete_profile)
+        buttons_row.addStretch(1)
+        g_layout.addLayout(buttons_row)
+
+        group.setLayout(g_layout)
+        layout.addWidget(group)
+
+        close_btn = QPushButton("Close")
+        close_btn.clicked.connect(self.close)
+        layout.addWidget(close_btn, alignment=Qt.AlignmentFlag.AlignRight)
+
+
+class TilesDialog(QDialog):
+    def __init__(self, main: "MainWindow"):
+        super().__init__(main)
+        self.main = main
+        self.setWindowTitle("Tiles")
+        self.setModal(False)
+        self.resize(900, 600)
+
+        layout = QVBoxLayout(self)
+
+        # Left: tiles list + buttons
+        tiles_group = QGroupBox("Tiles in Profile")
+        tiles_group_layout = QVBoxLayout()
+        tiles_group_layout.addWidget(self.main.tile_list)
+
+        tile_buttons_row = QHBoxLayout()
+        tile_buttons_row.addWidget(self.main.btn_new_tile)
+        tile_buttons_row.addWidget(self.main.btn_delete_tile)
+        tile_buttons_row.addStretch(1)
+        tiles_group_layout.addLayout(tile_buttons_row)
+        tiles_group.setLayout(tiles_group_layout)
+
+        # Right: tile editor
+        editor_group = QGroupBox("Tile Editor")
+        editor_layout = QVBoxLayout()
+        editor_layout.addWidget(self.main.tile_editor)
+        editor_group.setLayout(editor_layout)
+
+        # Combined row
+        content_row = QHBoxLayout()
+        content_row.addWidget(tiles_group, stretch=1)
+        content_row.addWidget(editor_group, stretch=2)
+
+        layout.addLayout(content_row)
+
+        close_btn = QPushButton("Close")
+        close_btn.clicked.connect(self.close)
+        layout.addWidget(close_btn, alignment=Qt.AlignmentFlag.AlignRight)
+
+
+class KWinRulesDialog(QDialog):
+    def __init__(self, main: "MainWindow"):
+        super().__init__(main)
+        self.main = main
+        self.setWindowTitle("KWin Rules")
+        self.setModal(False)
+        self.resize(600, 500)
+
+        layout = QVBoxLayout(self)
+
+        rules_group = QGroupBox("KWin Rules (enabled/disabled)")
+        rules_layout = QVBoxLayout()
+        rules_layout.addWidget(self.main.rules_list)
+
+        rule_buttons_row = QHBoxLayout()
+        rule_buttons_row.addWidget(self.main.btn_delete_rule)
+        rule_buttons_row.addStretch(1)
+        rules_layout.addLayout(rule_buttons_row)
+
+        rules_group.setLayout(rules_layout)
+        layout.addWidget(rules_group)
+
+        close_btn = QPushButton("Close")
+        close_btn.clicked.connect(self.close)
+        layout.addWidget(close_btn, alignment=Qt.AlignmentFlag.AlignRight)
 
 if __name__ == "__main__":
     raise SystemExit(main())
