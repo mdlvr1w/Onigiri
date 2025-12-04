@@ -32,15 +32,25 @@ mkdir -p "$INSTALL_DIR" "$BIN_DIR" "$DESKTOP_DIR" "$CONFIG_DIR"
 echo "📁 Copying application files..."
 cp "$SCRIPT_DIR/onigiri.py" "$INSTALL_DIR/"
 cp "$SCRIPT_DIR/onigiri_ui.py" "$INSTALL_DIR/"
+cp "$SCRIPT_DIR/models.py" "$INSTALL_DIR/"
+cp "$SCRIPT_DIR/service.py" "$INSTALL_DIR/"
+cp "$SCRIPT_DIR/layout_canvas.py" "$INSTALL_DIR/"
 cp "$SCRIPT_DIR/onigiri_icon.png" "$INSTALL_DIR/" 2>/dev/null || true
 cp "$SCRIPT_DIR/README.md" "$INSTALL_DIR/" 2>/dev/null || true
-cp "$SCRIPT_DIR/onigiri.json" "$CONFIG_DIR/" 2>/dev/null || true
 
-# 3) Create virtual environment
+# 3) Install default config ONLY if none exists
+if [ ! -f "$CONFIG_DIR/onigiri.json" ]; then
+  echo "📝 Installing default config to $CONFIG_DIR/onigiri.json"
+  cp "$SCRIPT_DIR/onigiri.json" "$CONFIG_DIR/"
+else
+  echo "⚠️  Existing config at $CONFIG_DIR/onigiri.json detected – keeping it."
+fi
+
+# 4) Create virtual environment
 echo "🐍 Creating virtual environment at $VENV_DIR..."
 python3 -m venv "$VENV_DIR"
 
-# 4) Install dependencies into venv
+# 5) Install dependencies into venv
 echo "📦 Installing Python dependencies into venv..."
 "$VENV_DIR/bin/pip" install --upgrade pip
 
@@ -53,7 +63,7 @@ else
   "$VENV_DIR/bin/pip" install PyQt6
 fi
 
-# 5) Create launcher script in ~/.local/bin
+# 6) Create launcher script in ~/.local/bin
 LAUNCHER="$BIN_DIR/$APP_NAME"
 echo "🚀 Creating launcher at $LAUNCHER"
 
@@ -68,7 +78,7 @@ EOF
 
 chmod +x "$LAUNCHER"
 
-# 6) Create .desktop file for KDE / desktops
+# 7) Create .desktop file for KDE / desktops
 DESKTOP_FILE="$DESKTOP_DIR/onigiri.desktop"
 echo "🖥  Creating desktop entry at $DESKTOP_FILE"
 
