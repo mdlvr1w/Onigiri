@@ -1,13 +1,16 @@
 #!/usr/bin/env python3
+from __future__ import annotations
 import sys
 import os
 from pathlib import Path
-from typing import Any, Dict, List, Optional
-import subprocess
+from typing import Any, Dict, List, Optional, cast, Callable
 import copy
 import logging
 
 logger = logging.getLogger(__name__)
+
+def qt_connect(signal: Any, slot: Callable[..., None]) -> None:
+    signal.connect(slot)
 
 from PyQt6.QtWidgets import (
     QApplication,
@@ -30,13 +33,12 @@ from PyQt6.QtWidgets import (
     QMenu,
     QDialog,
     QDialogButtonBox,
-    QInputDialog,
     QFileDialog,
     QGroupBox,
 )
 
-from PyQt6.QtCore import Qt, pyqtSignal, QPointF, QStandardPaths
-from PyQt6.QtGui import QPainter, QColor, QPen, QBrush, QMouseEvent, QIcon, QAction, QPixmap
+from PyQt6.QtCore import Qt, pyqtSignal, QStandardPaths
+from PyQt6.QtGui import QIcon, QAction
 from models import TileModel, ProfileModel, ConfigModel, ConfigValidator
 from service import OnigiriService
 from layout_canvas import LayoutCanvas
@@ -75,7 +77,7 @@ class TileEditor(QWidget):
 
         for spin in (self.x_spin, self.y_spin, self.w_spin, self.h_spin):
             spin.setRange(0, 10000)
-            spin.valueChanged.connect(self._on_geometry_spin_changed)
+            qt_connect(spin.valueChanged, self._on_geometry_spin_changed)
 
         # Match config
         self.match_type_combo = QComboBox()
@@ -130,12 +132,12 @@ class TileEditor(QWidget):
         self.setLayout(layout)
 
         # Connections
-        self.mode_combo.currentIndexChanged.connect(self._update_mode_enabled_state)
-        self.terminal_combo.currentIndexChanged.connect(self._recompute_command_from_helper)
-        self.shell_command_edit.textChanged.connect(self._recompute_command_from_helper)
-        self.app_combo.currentIndexChanged.connect(self._on_app_changed)
-        self.name_edit.textChanged.connect(self._on_name_changed)
-        self.btn_launch_tile.clicked.connect(self._on_launch_tile_clicked)
+        qt_connect(self.mode_combo.currentIndexChanged, self._update_mode_enabled_state)
+        qt_connect(self.terminal_combo.currentIndexChanged, self._recompute_command_from_helper)
+        qt_connect(self.shell_command_edit.textChanged, self._recompute_command_from_helper)
+        qt_connect(self.app_combo.currentIndexChanged, self._on_app_changed)
+        qt_connect(self.name_edit.textChanged, self._on_name_changed)
+        qt_connect(self.btn_launch_tile.clicked, self._on_launch_tile_clicked)
 
         # Load system applications
         self._load_applications()
@@ -158,12 +160,14 @@ class TileEditor(QWidget):
         self.apply_changes()
 
         # Tell MainWindow: "launch the currently selected tile"
-        self.launchTileRequested.emit()
+        cast(Any, self.launchTileRequested).emit()
 
     def _on_geometry_spin_changed(self) -> None:
         if self._loading:
             return
-        self.geometryEdited.emit()
+        # this should notify “geometry changed”
+        signal = cast(Any, self.geometryEdited)
+        signal.emit()
 
     def _on_name_changed(self, _text: str) -> None:
         if self._loading:
@@ -189,9 +193,9 @@ class TileEditor(QWidget):
                 continue
             for desktop_file in base_path.glob("*.desktop"):
                 try:
-                    with desktop_file.open("r", encoding="utf-8", errors="ignore") as f:
+                    with open(desktop_file, "r", encoding="utf-8", errors="ignore") as f:
                         lines = f.readlines()
-                except Exception:
+                except OSError:
                     continue
 
                 app_id = desktop_file.name
@@ -340,7 +344,7 @@ class TileEditor(QWidget):
             exec_cmd = data.get("exec", "") or ""
             self.command_edit.setPlainText(exec_cmd)
 
-    def _on_app_changed(self, index: int) -> None:
+    def _on_app_changed(self, _index: int) -> None:
         if self._loading:
             return
         if self.mode_combo.currentText() != "Application":
@@ -575,11 +579,13 @@ class GridTemplateDialog(QDialog):
         self.entries_layout = QFormLayout(self.entries_widget)
 
         # Buttons
-        buttons = QDialogButtonBox(
-            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
-        )
-        buttons.accepted.connect(self.accept)
-        buttons.rejected.connect(self.reject)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok)
+
+        cancel_btn = QPushButton("Cancel")
+        buttons.addButton(cancel_btn, QDialogButtonBox.ButtonRole.RejectRole)
+
+        qt_connect(buttons.accepted, self.accept)
+        qt_connect(buttons.rejected, self.reject)
 
         # Main layout
         layout = QVBoxLayout(self)
@@ -594,8 +600,7 @@ class GridTemplateDialog(QDialog):
         self.setLayout(layout)
 
         # Rebuild when count changes
-        self.count_spin.valueChanged.connect(self._rebuild_entries)
-
+        qt_connect(self.count_spin.valueChanged, self._rebuild_entries)
         # Initial entries
         self._rebuild_entries()
 
@@ -629,10 +634,337 @@ class GridTemplateDialog(QDialog):
         return mode, counts
 
 
+# ===================== Controllers =====================
+
+class ProfileController:
+    """
+    Handles profile-related actions (select, new, rename, delete).
+    Operates on the MainWindow, but keeps the logic in one place.
+    """
+    def __init__(self, window: "MainWindow") -> None:
+        self.window = window
+
+    def on_profile_selected(self, current: QListWidgetItem, _previous: Optional[QListWidgetItem]) -> None:
+        w = self.window
+
+        # flush pending tile edits via TileController
+        w.tile_controller.flush_tile_edits()
+
+        if not current:
+            w.current_profile_index = None
+            w.clear_tile_selection_and_editor()
+            w.load_profile_settings_to_ui(None)
+
+            # Keep combo in sync
+            w.profile_combo.blockSignals(True)
+            w.profile_combo.setCurrentIndex(-1)
+            w.profile_combo.blockSignals(False)
+            return
+
+        profile_index = int(current.data(Qt.ItemDataRole.UserRole))
+        w.current_profile_index = profile_index
+
+        profile = w.get_current_profile()
+        w.populate_tiles(profile_index)
+        w.load_profile_settings_to_ui(profile)
+
+        # Sync top-bar combo with the new index
+        if 0 <= profile_index < w.profile_combo.count():
+            w.profile_combo.blockSignals(True)
+            w.profile_combo.setCurrentIndex(profile_index)
+            w.profile_combo.blockSignals(False)
+
+    def on_new_profile(self) -> None:
+        w = self.window
+
+        w.push_undo_state()
+
+        name, ok = w.simple_prompt("New Profile", "Profile name:")
+        if not ok or not name.strip():
+            return
+
+        w.config.add_profile(name.strip())
+        w.populate_profiles()
+        new_index = len(w.get_profiles()) - 1
+        w.profile_list.setCurrentRow(new_index)
+
+    def on_rename_profile(self) -> None:
+        w = self.window
+
+        profile = w.get_current_profile()
+        if not profile:
+            QMessageBox.warning(w, "No profile", "Select a profile to rename.")
+            return
+
+        old_name = profile.name or "<unnamed>"
+
+        new_name, ok = w.simple_prompt("Rename Profile", "New profile name:", default=old_name)
+        if not ok:
+            return
+
+        new_name = new_name.strip()
+        if not new_name:
+            QMessageBox.warning(w, "Invalid name", "Profile name cannot be empty.")
+            return
+
+        # Check for duplicate names
+        for p in w.get_profiles():
+            if p is profile:
+                continue
+            if p.name == new_name:
+                QMessageBox.warning(
+                    w,
+                    "Duplicate name",
+                    f"Another profile is already called '{new_name}'.",
+                )
+                return
+
+        w.push_undo_state()
+        profile.name = new_name
+
+        # Update the list item text
+        current_item = w.profile_list.currentItem()
+        if current_item is not None:
+            current_item.setText(new_name)
+
+        # Persist + refresh rule list UI
+        w.engine.save_config(w.config)
+        w.populate_system_rules()
+
+    def on_delete_profile(self) -> None:
+        w = self.window
+
+        w.push_undo_state()
+
+        profile = w.get_current_profile()
+        if not profile:
+            QMessageBox.warning(w, "No profile", "Select a profile to delete.")
+            return
+
+        name = profile.name or "<unnamed>"
+        reply = QMessageBox.question(
+            w,
+            "Delete Profile",
+            f"Delete profile '{name}' and its KWin Window Rules?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+
+        # Try to remove profile rules first
+        try:
+            w.engine.remove_profile_rules(profile)
+        except Exception as e:
+            QMessageBox.warning(
+                w,
+                "Warning",
+                f"Failed to remove KWin rules for '{name}':\n{e}\n"
+                "The profile will still be removed from the config.",
+            )
+
+        if w.current_profile_index is not None:
+            w.config.remove_profile(w.current_profile_index)
+
+        w.current_profile_index = None
+        w.current_tile_index = None
+
+        if not w.save_config_with_error("save config after deleting profile"):
+            return
+
+        # Refresh lists and clear the now-invalid tile selection/editor
+        w.reload_profiles_and_rules()
+        w.clear_tile_selection_and_editor()
+        w.load_profile_settings_to_ui(None)
+
+        QMessageBox.information(w, "Deleted", f"Profile '{name}' deleted.")
+
+
+class TileController:
+    """
+    Handles tile-related actions (select, new, delete, editor flush, canvas sync).
+    Operates on the MainWindow, but keeps the logic in one place.
+    """
+    def __init__(self, window: "MainWindow") -> None:
+        self.window = window
+
+    def flush_tile_edits(self, item: Optional[QListWidgetItem] = None) -> None:
+        """
+        Push the editor's current values into the TileModel for the given item.
+        If no item is passed, it uses the currently selected item.
+        """
+        w = self.window
+
+        profile = w.get_current_profile()
+        if not profile:
+            return
+
+        if item is None:
+            item = w.tile_list.currentItem()
+        if not item:
+            return
+
+        tile = w.get_tile_from_item(item)
+        if not tile:
+            return
+
+        # Apply changes into that tile
+        w.tile_editor.current_profile = profile
+        w.tile_editor.current_tile = tile
+        w.tile_editor.apply_changes()
+
+        # Refresh canvas
+        w.canvas.update()
+
+        # Update list label
+        item.setText(tile.name or "<tile>")
+
+    def on_tile_selected(self, current: QListWidgetItem, previous: Optional[QListWidgetItem]) -> None:
+        """
+        Called when the tile selection in the list changes.
+        Flushes edits into the previously selected tile, then loads the new one.
+        """
+        w = self.window
+
+        # 1) Flush edits for the previously selected tile, if any
+        if previous is not None:
+            self.flush_tile_edits(previous)
+
+        # 2) Clear UI if nothing is selected now
+        if not current:
+            w.current_tile_index = None
+            w.tile_editor.clear()
+            w.canvas.set_selected_index(None)
+            return
+
+        profile = w.get_current_profile()
+        if not profile:
+            return
+
+        tile = w.get_tile_from_item(current)
+        if not tile:
+            return
+
+        # Keep index in sync for other code that still uses it
+        row = w.tile_list.row(current)
+        w.current_tile_index = row
+
+        # Load selected tile into editor and canvas
+        w.tile_editor.load_tile(profile, tile)
+        w.canvas.set_selected_index(row)
+
+    def on_canvas_tile_selected(self, idx: int) -> None:
+        """Canvas clicked a tile -> select same row in list."""
+        w = self.window
+        if 0 <= idx < w.tile_list.count():
+            w.tile_list.setCurrentRow(idx)
+
+    def on_new_tile(self) -> None:
+        w = self.window
+
+        profile = w.get_current_profile()
+        if not profile:
+            QMessageBox.warning(w, "No profile", "Select a profile first.")
+            return
+
+        w.push_undo_state()
+
+        profile.add_tile()
+        w.populate_tiles(w.current_profile_index)
+
+        new_tile_index = len(profile.tiles) - 1
+        w.current_tile_index = new_tile_index
+
+        if new_tile_index >= 0:
+            w.tile_list.setCurrentRow(new_tile_index)
+            w.canvas.set_profile(profile)
+
+    def on_delete_tile(self) -> None:
+        w = self.window
+
+        profile = w.get_current_profile()
+        if not profile:
+            return
+
+        current_item = w.tile_list.currentItem()
+        if not current_item:
+            return
+
+        tile = w.get_tile_from_item(current_item)
+        if not tile:
+            return
+
+        tiles = profile.tiles
+        try:
+            idx = tiles.index(tile)
+        except ValueError:
+            # Fallback: row-based deletion
+            idx = w.tile_list.currentRow()
+
+        if not (0 <= idx < len(tiles)):
+            return
+
+        # 🔸 Take snapshot BEFORE actually deleting anything
+        w.push_undo_state()
+
+        reply = QMessageBox.question(
+            w,
+            "Delete Tile",
+            f"Delete tile '{tile.name or '<tile>'}'?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+
+        # Remove from profile by the *real* index of that TileModel
+        profile.remove_tile(idx)
+
+        # Update selection index
+        if len(profile.tiles) == 0:
+            w.current_tile_index = None
+        else:
+            if idx >= len(profile.tiles):
+                idx = len(profile.tiles) - 1
+            w.current_tile_index = idx
+
+        # Refresh UI
+        w.populate_tiles(w.current_profile_index)
+        w.canvas.set_profile(profile)
+
+        if w.current_tile_index is not None:
+            w.tile_list.setCurrentRow(w.current_tile_index)
+            new_tile = profile.tiles[w.current_tile_index]
+            w.tile_editor.load_tile(profile, new_tile)
+        else:
+            w.tile_editor.clear()
+
+        # Persist config (best-effort)
+        try:
+            w.engine.save_config(w.config)
+        except (OSError, ValueError, RuntimeError) as e:
+            logger.warning("Failed to save config after deleting tile: %s", e)
+
+
 # ===================== Main Window =====================
 
 
 class MainWindow(QWidget):
+
+    # Attribute declarations for type checkers / linters
+    engine: OnigiriService
+    config: ConfigModel
+    validator: ConfigValidator
+
+    current_profile_index: Optional[int]
+    current_tile_index: Optional[int]
+
+    undo_stack: List[Dict[str, Any]]
+    redo_stack: List[Dict[str, Any]]
+
+    _rules_updating: bool
+    _loading_profile_settings: bool
+
+
+
     def __init__(self):
         super().__init__()
 
@@ -662,7 +994,7 @@ class MainWindow(QWidget):
             QPushButton {
                 background-color: #333333;
                 border: 1px solid #555555;
-                border-radius: 6px;
+                border-radius: 4px;
                 padding: 4px 10px;
             }
             QPushButton:hover {
@@ -679,6 +1011,12 @@ class MainWindow(QWidget):
             }
         """)
 
+        self._init_engine_and_state()
+        self._init_widgets_and_layout()
+        self._init_controllers()
+        self._init_signals()
+
+    def _init_engine_and_state(self) -> None:
         # Engine service and config
         self.engine = OnigiriService()
         self.config = self.engine.load_config()
@@ -700,6 +1038,7 @@ class MainWindow(QWidget):
         # internal flag to avoid reacting while loading profile settings
         self._loading_profile_settings: bool = False
 
+    def _init_widgets_and_layout(self) -> None:
         # === Widgets ===
         # main_layout = QHBoxLayout(self)
 
@@ -720,22 +1059,25 @@ class MainWindow(QWidget):
 
         # Button to delete the currently selected KWin rule
         self.btn_delete_rule = QPushButton("Delete Rule")
-        self.btn_delete_rule.setToolTip(
-            "Delete the selected KWin window rule from kwinrulesrc."
-        )
 
-        # Right: tile editor
-        self.tile_editor = TileEditor()
+        # Buttons for profiles
+        self.btn_new_profile = QPushButton("New Profile")
+        self.btn_rename_profile = QPushButton("Rename")
+        self.btn_delete_profile = QPushButton("Delete")
 
-        # Bottom canvas (profile designer)
+        # Buttons for tiles
+        self.btn_new_tile = QPushButton("New Tile")
+        self.btn_delete_tile = QPushButton("Delete")
+
+        # Undo/redo buttons
+        self.btn_undo = QPushButton("Undo")
+        self.btn_redo = QPushButton("Redo")
+
+        # Canvas & editor
         self.canvas = LayoutCanvas()
 
-        # Make sure the canvas asks for more vertical space
-        self.canvas.setMinimumHeight(450)
-
-        # Button to load a background image for the canvas
-        self.btn_canvas_bg = QPushButton("Load Canvas Background")
-        self.btn_canvas_bg.setToolTip("Pick an image (e.g. a desktop screenshot) as canvas background")
+        # Tile editor
+        self.tile_editor = TileEditor()
 
         # Profile-level settings (gap)
         self.tile_gap_spin = QSpinBox()
@@ -756,11 +1098,6 @@ class MainWindow(QWidget):
         self.profile_combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToContents)
         self.profile_combo.setToolTip("Select the active profile.")
 
-        # Buttons to open detail dialogs
-        self.btn_open_profiles = QPushButton("Edit Profiles…")
-        self.btn_open_tiles = QPushButton("Edit Tiles…")
-        self.btn_open_rules = QPushButton("KWin Rules…")
-
         # Layout editor buttons
         self.btn_edit_layout = QPushButton("Edit Layout")
         self.btn_new_layout = QPushButton("New Layout")
@@ -769,19 +1106,11 @@ class MainWindow(QWidget):
         self.btn_load_layout = QPushButton("Load Layout")
         self.btn_delete_layout = QPushButton("Delete Layout")
 
-        # Bottom buttons
-        button_layout = QHBoxLayout()
-        self.btn_new_profile = QPushButton("New Profile")
-        self.btn_rename_profile = QPushButton("Rename Profile")
-        self.btn_delete_profile = QPushButton("Delete Profile")
-        self.btn_new_tile = QPushButton("New Tile")
-        self.btn_delete_tile = QPushButton("Delete Tile")
+        # Canvas background button
+        self.btn_canvas_bg = QPushButton("Canvas Background…")
+        self.btn_canvas_bg.setToolTip("Pick an image (e.g. a desktop screenshot) as canvas background")
 
-        self.btn_undo = QPushButton("Undo")
-        self.btn_redo = QPushButton("Redo")
-        self.btn_undo.setEnabled(False)
-        self.btn_redo.setEnabled(False)
-
+        # Bottom action buttons
         self.btn_save = QPushButton("Save Config")
         self.btn_apply = QPushButton("Apply Profile (Rules)")
         self.btn_launch = QPushButton("Launch Apps")
@@ -798,7 +1127,110 @@ class MainWindow(QWidget):
             "Create an autostart entry that starts Onigiri with this profile."
         )
 
-        # Global bottom action row: undo/redo on the left, run actions on the right
+        # --- Top bar: logo + profile selector + dialogs + rules toggle ---
+        top_bar_layout = QHBoxLayout()
+
+        # Tiny logo / icon on the left
+        logo_label = QLabel()
+        logo_label.setPixmap(self.geticon().pixmap(24, 24))
+        top_bar_layout.addWidget(logo_label)
+
+        top_bar_layout.addSpacing(8)
+
+        # Profile selector row
+        top_bar_layout.addWidget(QLabel("Profile:"))
+        top_bar_layout.addWidget(self.profile_combo, stretch=1)
+
+        # Spacer and maybe future rule toggles
+        top_bar_layout.addStretch(1)
+
+        # --- Center grid: left (profiles), middle (tiles), right (rules) ---
+        center_layout = QHBoxLayout()
+
+        # Profiles group
+        profiles_group = QGroupBox("Profiles")
+        profiles_layout = QVBoxLayout(profiles_group)
+        profiles_layout.addWidget(self.profile_list)
+
+        profile_buttons_row = QHBoxLayout()
+        profile_buttons_row.addWidget(self.btn_new_profile)
+        profile_buttons_row.addWidget(self.btn_rename_profile)
+        profile_buttons_row.addWidget(self.btn_delete_profile)
+        profiles_layout.addLayout(profile_buttons_row)
+
+        center_layout.addWidget(profiles_group)
+
+        # Tiles group
+        tiles_group = QGroupBox("Tiles")
+        tiles_layout = QVBoxLayout(tiles_group)
+        tiles_layout.addWidget(self.tile_list)
+
+        tile_buttons_row = QHBoxLayout()
+        tile_buttons_row.addWidget(self.btn_new_tile)
+        tile_buttons_row.addWidget(self.btn_delete_tile)
+        tiles_layout.addLayout(tile_buttons_row)
+
+        center_layout.addWidget(tiles_group)
+
+        # KWin rules group
+        rules_group = QGroupBox("System KWin Rules")
+        rules_layout = QVBoxLayout(rules_group)
+        rules_layout.addWidget(self.rules_list)
+        rules_layout.addWidget(self.btn_delete_rule)
+
+        center_layout.addWidget(rules_group)
+
+        # Make the center layout more compact and aligned
+        center_layout.setStretchFactor(profiles_group, 1)
+        center_layout.setStretchFactor(tiles_group, 1)
+        center_layout.setStretchFactor(rules_group, 1)
+
+        # --- Layout canvas + editor ---
+        canvas_and_editor = QHBoxLayout()
+
+        # Left: canvas
+        canvas_card = QGroupBox("Layout Canvas")
+        canvas_card_layout = QVBoxLayout(canvas_card)
+        canvas_card_layout.addWidget(self.canvas)
+
+        canvas_and_editor.addWidget(canvas_card, stretch=2)
+
+        # Right: tile editor
+        editor_card = QGroupBox("Tile Editor")
+        editor_card_layout = QVBoxLayout(editor_card)
+        editor_card_layout.addWidget(self.tile_editor)
+
+        canvas_and_editor.addWidget(editor_card, stretch=1)
+
+        # --- Profile settings row (gap + monitor + layout selector + layout buttons) ---
+        profile_settings_layout = QHBoxLayout()
+
+        profile_settings_layout.addWidget(QLabel("Tile gap:"))
+        profile_settings_layout.addWidget(self.tile_gap_spin)
+
+        profile_settings_layout.addSpacing(16)
+
+        profile_settings_layout.addWidget(QLabel("Monitor:"))
+        profile_settings_layout.addWidget(self.monitor_combo)
+
+        profile_settings_layout.addSpacing(16)
+
+        profile_settings_layout.addWidget(QLabel("Layout:"))
+        profile_settings_layout.addWidget(self.layout_combo, stretch=1)
+
+        profile_settings_layout.addSpacing(16)
+
+        profile_settings_layout.addWidget(self.btn_edit_layout)
+        profile_settings_layout.addWidget(self.btn_new_layout)
+        profile_settings_layout.addWidget(self.btn_rename_layout)
+        profile_settings_layout.addWidget(self.btn_save_layout)
+        profile_settings_layout.addWidget(self.btn_load_layout)
+        profile_settings_layout.addWidget(self.btn_delete_layout)
+
+        profile_settings_layout.addStretch(1)
+
+        # --- Bottom action row (undo/redo/save/apply/launch/autostart) ---
+        button_layout = QHBoxLayout()
         button_layout.addStretch()
         button_layout.addWidget(self.btn_undo)
         button_layout.addWidget(self.btn_redo)
@@ -808,78 +1240,7 @@ class MainWindow(QWidget):
         button_layout.addWidget(self.btn_launch)
         button_layout.addWidget(self.btn_autostart)
 
-        # Assemble main layout (new dashboard-style UI)
-
-        main_layout = QVBoxLayout(self)
-        main_layout.setContentsMargins(16, 16, 16, 16)
-        main_layout.setSpacing(10)
-
-        # --- Top bar: title + profile selector + dialog shortcuts ---
-        top_bar = QHBoxLayout()
-
-        # Logo + Title (tight spacing)
-        logo_label = QLabel()
-
-        icon = self.geticon()
-        pix = icon.pixmap(64, 64)
-        logo_label.setPixmap(pix)
-        logo_label.setAlignment(Qt.AlignmentFlag.AlignVCenter)
-
-        title_label = QLabel("Onigiri")
-        title_label.setStyleSheet("font-size: 18px; font-weight: 600;")
-        title_label.setAlignment(Qt.AlignmentFlag.AlignVCenter)
-
-        # Add logo + text RIGHT next to each other (no spacing)
-        top_bar.addWidget(logo_label)
-        top_bar.addWidget(title_label)
-
-        # Add a tiny gap only AFTER the pair (to separate from the rest)
-        top_bar.addSpacing(4)
-
-        top_bar.addStretch(1)
-
-        # Profile selector
-        top_bar.addWidget(QLabel("Profile:"))
-        top_bar.addWidget(self.profile_combo)
-
-        # Dialog buttons
-        top_bar.addSpacing(12)
-        top_bar.addWidget(self.btn_open_profiles)
-        top_bar.addWidget(self.btn_open_tiles)
-        top_bar.addWidget(self.btn_open_rules)
-
-        main_layout.addLayout(top_bar)
-
-        # --- Row: profile settings (gap + monitor + layout) ---
-        profile_settings_layout = QHBoxLayout()
-
-        # Gap
-        profile_settings_layout.addWidget(QLabel("Tile gap (px):"))
-        profile_settings_layout.addWidget(self.tile_gap_spin)
-        profile_settings_layout.addSpacing(20)
-
-        # Monitor selector
-        profile_settings_layout.addWidget(QLabel("Monitor:"))
-        profile_settings_layout.addWidget(self.monitor_combo)
-        profile_settings_layout.addSpacing(20)
-
-        # Layout selector
-        profile_settings_layout.addWidget(QLabel("Layout:"))
-        profile_settings_layout.addWidget(self.layout_combo)
-        profile_settings_layout.addSpacing(10)
-
-        # Layout actions
-        profile_settings_layout.addWidget(self.btn_edit_layout)
-        profile_settings_layout.addWidget(self.btn_new_layout)
-        profile_settings_layout.addWidget(self.btn_rename_layout)
-        profile_settings_layout.addWidget(self.btn_save_layout)
-        profile_settings_layout.addWidget(self.btn_load_layout)
-        profile_settings_layout.addWidget(self.btn_delete_layout)
-
-        profile_settings_layout.addStretch(1)
-        main_layout.addLayout(profile_settings_layout)
-
-        # --- Canvas card: background button + canvas ---
+        # --- Canvas block: background button + canvas ---
         canvas_block = QVBoxLayout()
 
         bg_button_row = QHBoxLayout()
@@ -887,60 +1248,69 @@ class MainWindow(QWidget):
         bg_button_row.addWidget(self.btn_canvas_bg)
 
         canvas_block.addLayout(bg_button_row)
-        canvas_block.addWidget(self.canvas, stretch=1)
+        canvas_block.addLayout(canvas_and_editor, stretch=1)
 
+        # --- Assemble main layout (new dashboard-style UI) ---
+        main_layout = QVBoxLayout(self)
+        main_layout.addLayout(top_bar_layout)
+        main_layout.addLayout(center_layout)
+        main_layout.addLayout(profile_settings_layout)
         main_layout.addLayout(canvas_block, stretch=1)
-
-        # --- Bottom action row (undo/redo/save/apply/launch/autostart) ---
         main_layout.addLayout(button_layout)
 
         self.setLayout(main_layout)
 
+    def _init_controllers(self) -> None:
+        """
+        Create controller objects that encapsulate profile and tile behaviors.
+        """
+        self.profile_controller = ProfileController(self)
+        self.tile_controller = TileController(self)
+
+    def _init_signals(self) -> None:
         # === Signals ===
-        self.profile_list.currentItemChanged.connect(self.on_profile_selected)
-        self.tile_list.currentItemChanged.connect(self.on_tile_selected)
-        self.rules_list.itemChanged.connect(self.on_rule_toggled)
-        self.btn_delete_rule.clicked.connect(self.on_delete_rule)
-        self.btn_new_profile.clicked.connect(self.on_new_profile)
-        self.btn_rename_profile.clicked.connect(self.on_rename_profile)
-        self.btn_delete_profile.clicked.connect(self.on_delete_profile)
-        self.btn_new_tile.clicked.connect(self.on_new_tile)
-        self.btn_delete_tile.clicked.connect(self.on_delete_tile)
-        self.btn_undo.clicked.connect(self.on_undo)
-        self.btn_redo.clicked.connect(self.on_redo)
-        self.btn_save.clicked.connect(self.on_save_config)
-        self.btn_apply.clicked.connect(self.on_apply_profile)
-        self.btn_launch.clicked.connect(self.on_launch_apps)
-        self.btn_autostart.clicked.connect(self.on_create_autostart)
-        self.btn_canvas_bg.clicked.connect(self.on_load_canvas_background)
-        self.profile_combo.currentIndexChanged.connect(self.on_profile_combo_changed)
+        qt_connect(self.profile_list.currentItemChanged, self.profile_controller.on_profile_selected)
+        qt_connect(self.tile_list.currentItemChanged, self.tile_controller.on_tile_selected)
+        qt_connect(self.rules_list.itemChanged, self.on_rule_toggled)
+        qt_connect(self.btn_delete_rule.clicked, self.on_delete_rule)
+        qt_connect(self.btn_new_profile.clicked, self.profile_controller.on_new_profile)
+        qt_connect(self.btn_rename_profile.clicked, self.profile_controller.on_rename_profile)
+        qt_connect(self.btn_delete_profile.clicked, self.profile_controller.on_delete_profile)
+        qt_connect(self.btn_new_tile.clicked, self.tile_controller.on_new_tile)
+        qt_connect(self.btn_delete_tile.clicked, self.tile_controller.on_delete_tile)
+        qt_connect(self.btn_undo.clicked, self.on_undo)
+        qt_connect(self.btn_redo.clicked, self.on_redo)
+        qt_connect(self.btn_save.clicked, self.on_save_config)
+        qt_connect(self.btn_apply.clicked, self.on_apply_profile)
+        qt_connect(self.btn_launch.clicked, self.on_launch_apps)
+        qt_connect(self.btn_autostart.clicked, self.on_create_autostart)
+
+        # Canvas background
+        qt_connect(self.btn_canvas_bg.clicked, self.on_load_canvas_background)
+        qt_connect(self.profile_combo.currentIndexChanged, self.on_profile_combo_changed)
 
         # Profile settings changes (gap + monitor + layout)
         self._init_monitor_list()
-        self.monitor_combo.currentIndexChanged.connect(self.on_monitor_changed)
+        qt_connect(self.monitor_combo.currentIndexChanged, self.on_monitor_changed)
+        qt_connect(self.layout_combo.currentIndexChanged, self.on_layout_combo_changed)
 
-        self.layout_combo.currentIndexChanged.connect(self.on_layout_combo_changed)
-
-        self.tile_gap_spin.valueChanged.connect(self.on_profile_settings_changed)
-        self.btn_edit_layout.clicked.connect(self.on_edit_layout)
-        self.btn_new_layout.clicked.connect(self.on_new_layout)
-        self.btn_rename_layout.clicked.connect(self.on_rename_layout)
-        self.btn_save_layout.clicked.connect(self.on_save_layout)
-        self.btn_load_layout.clicked.connect(self.on_load_layout)
-        self.btn_delete_layout.clicked.connect(self.on_delete_layout)
-        self.btn_open_profiles.clicked.connect(self.show_profiles_dialog)
-        self.btn_open_tiles.clicked.connect(self.show_tiles_dialog)
-        self.btn_open_rules.clicked.connect(self.show_rules_dialog)
-
-        # Canvas signals
-        self.canvas.tileSelected.connect(self.on_canvas_tile_selected)
-        self.canvas.geometryChanged.connect(self.on_canvas_geometry_changed)
+        qt_connect(self.tile_gap_spin.valueChanged, self.on_profile_settings_changed)
+        qt_connect(self.btn_edit_layout.clicked, self.on_edit_layout)
+        qt_connect(self.btn_new_layout.clicked, self.on_new_layout)
+        qt_connect(self.btn_rename_layout.clicked, self.on_rename_layout)
+        qt_connect(self.btn_save_layout.clicked, self.on_save_layout)
+        qt_connect(self.btn_load_layout.clicked, self.on_load_layout)
+        qt_connect(self.btn_delete_layout.clicked, self.on_delete_layout)
 
         # Tile editor live geometry updates -> update model + canvas
-        self.tile_editor.geometryEdited.connect(self.flush_tile_edits)
+        qt_connect(self.tile_editor.geometryEdited, self.tile_controller.flush_tile_edits)
 
         # Launch a single tile from the editor
-        self.tile_editor.launchTileRequested.connect(self.on_launch_single_tile)
+        qt_connect(self.tile_editor.launchTileRequested, self.on_launch_single_tile)
+
+        # Canvas → MainWindow: tile clicked and geometry changed
+        qt_connect(self.canvas.tileSelected, self.tile_controller.on_canvas_tile_selected)
+        qt_connect(self.canvas.geometryChanged, self.on_canvas_geometry_changed)
 
         # Populate initial lists
         self.populate_profiles()
@@ -976,15 +1346,15 @@ class MainWindow(QWidget):
         show_action = QAction("Show", self)
         quit_action = QAction("Quit", self)
 
-        show_action.triggered.connect(self._show_from_tray)
-        quit_action.triggered.connect(QApplication.instance().quit)
+        qt_connect(show_action.triggered, self._show_from_tray)
+        qt_connect(quit_action.triggered, QApplication.instance().quit)
 
         menu.addAction(show_action)
         menu.addSeparator()
         menu.addAction(quit_action)
 
         self.tray_icon.setContextMenu(menu)
-        self.tray_icon.activated.connect(self._on_tray_activated)
+        qt_connect(self.tray_icon.activated, self._on_tray_activated)
         self.tray_icon.show()
 
     def _show_from_tray(self) -> None:
@@ -1014,29 +1384,6 @@ class MainWindow(QWidget):
             super().closeEvent(event)
 
     # ----- Data helpers -----
-
-    def show_profiles_dialog(self) -> None:
-        if not hasattr(self, "_profiles_dialog"):
-            self._profiles_dialog = ProfilesDialog(self)
-        self._profiles_dialog.show()
-        self._profiles_dialog.raise_()
-        self._profiles_dialog.activateWindow()
-
-    def show_tiles_dialog(self) -> None:
-        if not hasattr(self, "_tiles_dialog"):
-            self._tiles_dialog = TilesDialog(self)
-        self._tiles_dialog.show()
-        self._tiles_dialog.raise_()
-        self._tiles_dialog.activateWindow()
-
-    def show_rules_dialog(self) -> None:
-        if not hasattr(self, "_rules_dialog"):
-            self._rules_dialog = KWinRulesDialog(self)
-        # Always refresh rules before showing
-        self.populate_system_rules()
-        self._rules_dialog.show()
-        self._rules_dialog.raise_()
-        self._rules_dialog.activateWindow()
 
     def _init_monitor_list(self) -> None:
         """
@@ -1092,9 +1439,9 @@ class MainWindow(QWidget):
         current_item = self.tile_list.currentItem()
         if not current_item:
             return None
-        return self._get_tile_from_item(current_item)
+        return self.get_tile_from_item(current_item)
 
-    def _get_tile_from_item(self, item: QListWidgetItem) -> Optional[TileModel]:
+    def get_tile_from_item(self, item: QListWidgetItem) -> Optional[TileModel]:
         """
         Safely resolve the TileModel that a QListWidgetItem represents.
         First tries the stored TileModel in UserRole+1, then falls back to row index.
@@ -1149,9 +1496,8 @@ class MainWindow(QWidget):
         self.profile_list.clear()
 
         # Also keep the top-bar combo in sync
-        if hasattr(self, "profile_combo"):
-            self.profile_combo.blockSignals(True)
-            self.profile_combo.clear()
+        self.profile_combo.blockSignals(True)
+        self.profile_combo.clear()
 
         for idx, profile in enumerate(self.get_profiles()):
             display_name = profile.name or "<unnamed>"
@@ -1162,11 +1508,9 @@ class MainWindow(QWidget):
             self.profile_list.addItem(item)
 
             # Top-bar combo (visual selector)
-            if hasattr(self, "profile_combo"):
-                self.profile_combo.addItem(display_name, idx)
+            self.profile_combo.addItem(display_name, idx)
 
-        if hasattr(self, "profile_combo"):
-            self.profile_combo.blockSignals(False)
+        self.profile_combo.blockSignals(False)
 
     def populate_tiles(self, profile_index: Optional[int]) -> None:
         self.tile_list.clear()
@@ -1229,7 +1573,7 @@ class MainWindow(QWidget):
 
     # ----- Internal UI refresh helpers -----
 
-    def _reload_profiles_and_rules(self) -> None:
+    def reload_profiles_and_rules(self) -> None:
         """
         Refresh the Profiles list and the KWin Rules list from the current config.
         Does NOT change any selection; callers are responsible for that.
@@ -1237,7 +1581,7 @@ class MainWindow(QWidget):
         self.populate_profiles()
         self.populate_system_rules()
 
-    def _clear_tile_selection_and_editor(self) -> None:
+    def clear_tile_selection_and_editor(self) -> None:
         """
         Clear the tile list and the tile editor, and reset the current tile index.
         Used when the current profile is deleted or when config is fully restored.
@@ -1246,7 +1590,7 @@ class MainWindow(QWidget):
         self.tile_list.clear()
         self.tile_editor.clear()
 
-    def _save_config_with_error(self, action_description: str) -> bool:
+    def save_config_with_error(self, action_description: str) -> bool:
         """
         Try to save the current config using the engine.
 
@@ -1286,15 +1630,15 @@ class MainWindow(QWidget):
         self.current_tile_index = None
 
         # Refresh UI from this config
-        self._reload_profiles_and_rules()
-        self._clear_tile_selection_and_editor()
+        self.reload_profiles_and_rules()
+        self.clear_tile_selection_and_editor()
         self.canvas.set_profile(None)
 
         # Optional: select first profile again if exists
         if self.profile_list.count() > 0:
             self.profile_list.setCurrentRow(0)
 
-    def _push_undo_state(self) -> None:
+    def push_undo_state(self) -> None:
         """
         Save the current config to the undo stack.
         Clears the redo stack (classic undo/redo behavior).
@@ -1322,31 +1666,28 @@ class MainWindow(QWidget):
                 self.tile_gap_spin.setValue(0)
                 self.tile_gap_spin.blockSignals(False)
 
-                # Reset monitor combo to "Primary (default)" if it exists
-                if hasattr(self, "monitor_combo"):
-                    self.monitor_combo.setCurrentIndex(0)
+                # Reset monitor combo to "Primary (default)"
+                self.monitor_combo.setCurrentIndex(0)
 
                 self.canvas.set_profile(None)
                 # Also clear layout combo
                 self.refresh_layout_combo()
                 return
 
-            # Gap
-            gap = int(profile.tile_gap)
+            # Gap from profile
             self.tile_gap_spin.blockSignals(True)
-            self.tile_gap_spin.setValue(gap)
+            self.tile_gap_spin.setValue(int(profile.tile_gap))
             self.tile_gap_spin.blockSignals(False)
 
-            # Monitor selection
-            if hasattr(self, "monitor_combo"):
-                monitor_name = profile.monitor or "default"
-                idx = 0
-                for i in range(self.monitor_combo.count()):
-                    data = self.monitor_combo.itemData(i)
-                    if str(data) == monitor_name:
-                        idx = i
-                        break
-                self.monitor_combo.setCurrentIndex(idx)
+            # Monitor selection from profile
+            monitor_name = profile.monitor or "default"
+            idx = 0
+            for i in range(self.monitor_combo.count()):
+                data = self.monitor_combo.itemData(i)
+                if str(data) == monitor_name:
+                    idx = i
+                    break
+            self.monitor_combo.setCurrentIndex(idx)
 
             # Canvas uses this profile (and its monitor) now
             self.canvas.set_profile(profile)
@@ -1359,9 +1700,6 @@ class MainWindow(QWidget):
         """
         Update the layout combo box for the current profile + monitor.
         """
-        if not hasattr(self, "layout_combo"):
-            return
-
         profile = self.get_current_profile()
 
         self.layout_combo.blockSignals(True)
@@ -1377,20 +1715,11 @@ class MainWindow(QWidget):
             self.layout_combo.blockSignals(False)
             return
 
-        # Get layout names from the model
-        try:
-            names = profile.layout_names
-        except Exception:
-            names = ["Default"]
+        # Get layout names from the model (ProfileModel guarantees at least ["Default"])
+        names = profile.layout_names
 
-        if not names:
-            names = ["Default"]
-
-        # Find current layout name
-        try:
-            current_name = profile.current_layout_name
-        except Exception:
-            current_name = names[0]
+        # Find current layout name, fall back to first name
+        current_name = profile.current_layout_name or names[0]
 
         current_index = 0
         for i, name in enumerate(names):
@@ -1400,18 +1729,11 @@ class MainWindow(QWidget):
 
         self.layout_combo.setCurrentIndex(current_index)
         self.layout_combo.setEnabled(True)
-
-        # Enable/disable layout actions
-        has_any_layouts = len(names) > 0
-        has_slots = bool(profile.layout_slots)
-
         self.btn_edit_layout.setEnabled(True)
         self.btn_new_layout.setEnabled(True)
-        self.btn_rename_layout.setEnabled(has_any_layouts)
         self.btn_save_layout.setEnabled(True)
-        self.btn_load_layout.setEnabled(has_slots)
-        self.btn_delete_layout.setEnabled(has_slots)
-
+        self.btn_load_layout.setEnabled(True)
+        self.btn_delete_layout.setEnabled(True)
         self.layout_combo.blockSignals(False)
 
     def on_layout_combo_changed(self, index: int) -> None:
@@ -1432,12 +1754,9 @@ class MainWindow(QWidget):
         if not name:
             return
 
-        try:
-            profile.current_layout_name = name
-            self.engine.save_config(self.config)
-        except Exception:
-            # Non-fatal; just ignore
-            pass
+        # Let errors surface instead of swallowing all Exception
+        profile.current_layout_name = name
+        self.engine.save_config(self.config)
 
         # Buttons might change availability depending on whether this layout has slots
         self.refresh_layout_combo()
@@ -1451,12 +1770,10 @@ class MainWindow(QWidget):
             QMessageBox.warning(self, "No profile", "Select a profile first.")
             return
 
-        # Suggest a name like "Layout 1", "Layout 2", ...
-        try:
-            existing = set(profile.layout_names)
-        except Exception:
-            existing = set()
+        # Existing layout names
+        existing = set(profile.layout_names)
 
+        # Suggest a name like "Layout 1", "Layout 2", ...
         base = "Layout"
         counter = 1
         suggested = f"{base} {counter}"
@@ -1483,22 +1800,17 @@ class MainWindow(QWidget):
 
         # Create empty layout in the model
         try:
-            if hasattr(profile, "create_empty_layout"):
-                profile.create_empty_layout(name)
-            else:
-                # Fallback: just use layout_slots property
-                if hasattr(profile, "current_layout_name"):
-                    profile.current_layout_name = name
-                profile.layout_slots = []
-        except Exception as e:
+            profile.create_empty_layout(name)
+        except (ValueError, TypeError) as e:
             QMessageBox.warning(self, "Error", f"Failed to create layout: {e}")
             return
 
         # Persist + refresh UI
         try:
             self.engine.save_config(self.config)
-        except Exception:
-            pass
+        except OSError as e:
+            QMessageBox.warning(self, "Save error", f"Failed to save layout: {e}")
+            return
 
         self.refresh_layout_combo()
         QMessageBox.information(
@@ -1518,11 +1830,7 @@ class MainWindow(QWidget):
             return
 
         # Fetch current layout name
-        try:
-            current_name = profile.current_layout_name
-        except Exception:
-            current_name = ""
-
+        current_name = profile.current_layout_name or ""
         if not current_name:
             QMessageBox.information(
                 self,
@@ -1532,15 +1840,12 @@ class MainWindow(QWidget):
             return
 
         # Existing layout names, to avoid duplicates
-        try:
-            existing_names = set(profile.layout_names)
-        except Exception:
-            existing_names = set()
+        existing_names = set(profile.layout_names)
 
         # Ask user for new name
         new_name, ok = self.simple_prompt(
             "Rename Layout",
-            f"New name for layout '{current_name}':",
+            "New layout name:",
             default=current_name,
         )
         if not ok:
@@ -1552,7 +1857,6 @@ class MainWindow(QWidget):
             return
 
         if new_name == current_name:
-            # No change, silently ignore
             return
 
         if new_name in existing_names:
@@ -1564,31 +1868,30 @@ class MainWindow(QWidget):
             return
 
         # Apply rename on the model
-        self._push_undo_state()
+        self.push_undo_state()
+
         try:
-            renamed = False
-            if hasattr(profile, "rename_layout"):
-                renamed = profile.rename_layout(current_name, new_name)
-            if not renamed:
-                QMessageBox.warning(
-                    self,
-                    "Rename failed",
-                    "Could not rename this layout in the profile model.",
-                )
-                return
-            self.engine.save_config(self.config)
-        except Exception as e:
+            renamed = profile.rename_layout(current_name, new_name)
+        except (ValueError, TypeError) as e:
             QMessageBox.warning(self, "Error", f"Failed to rename layout: {e}")
             return
 
-        # Refresh UI (combo text, enabled states)
-        self.refresh_layout_combo()
+        if not renamed:
+            QMessageBox.warning(
+                self,
+                "Rename failed",
+                "Could not rename this layout in the profile model.",
+            )
+            return
 
-        QMessageBox.information(
-            self,
-            "Layout renamed",
-            f"Layout '{current_name}' has been renamed to '{new_name}'.",
-        )
+        # Persist changes
+        try:
+            self.engine.save_config(self.config)
+        except OSError as e:
+            QMessageBox.warning(self, "Save error", f"Failed to save renamed layout:\n{e}")
+            return
+
+        self.refresh_layout_combo()
 
     def _apply_tile_gap_delta(self, profile: ProfileModel, old_gap: int, new_gap: int) -> None:
         """
@@ -1599,39 +1902,6 @@ class MainWindow(QWidget):
         return
 
     # ----- Slots -----
-
-    def on_profile_selected(self, current: QListWidgetItem, previous: Optional[QListWidgetItem]) -> None:
-        self.flush_tile_edits()
-
-        if not current:
-            self.current_profile_index = None
-            self._clear_tile_selection_and_editor()
-            self.load_profile_settings_to_ui(None)
-
-            # Keep combo in sync
-            if hasattr(self, "profile_combo"):
-                self.profile_combo.blockSignals(True)
-                self.profile_combo.setCurrentIndex(-1)
-                self.profile_combo.blockSignals(False)
-            return
-
-        profile_index = int(current.data(Qt.ItemDataRole.UserRole))
-        self.current_profile_index = profile_index
-        self.current_tile_index = None
-
-        self.populate_tiles(profile_index)
-        profile = self.get_current_profile()
-        self.load_profile_settings_to_ui(profile)
-        self.tile_editor.clear()
-
-        if self.tile_list.count() > 0:
-            self.tile_list.setCurrentRow(0)
-
-        # Sync top-bar combo with the new index
-        if hasattr(self, "profile_combo") and 0 <= profile_index < self.profile_combo.count():
-            self.profile_combo.blockSignals(True)
-            self.profile_combo.setCurrentIndex(profile_index)
-            self.profile_combo.blockSignals(False)
 
     def on_undo(self) -> None:
         """
@@ -1661,38 +1931,6 @@ class MainWindow(QWidget):
         self.undo_stack.append(current_snapshot)
         self._restore_config_from_snapshot(snapshot)
         self._update_undo_redo_buttons()
-
-    def on_tile_selected(self, current: QListWidgetItem, previous: Optional[QListWidgetItem]) -> None:
-        """
-        Called when the tile selection in the list changes.
-        Flushes edits into the previously selected tile, then loads the new one.
-        """
-        # 1) Flush edits for the previously selected tile, if any
-        if previous is not None:
-            self.flush_tile_edits(previous)
-
-        # 2) Clear UI if nothing is selected now
-        if not current:
-            self.current_tile_index = None
-            self.tile_editor.clear()
-            self.canvas.set_selected_index(None)
-            return
-
-        profile = self.get_current_profile()
-        if not profile:
-            return
-
-        tile = self._get_tile_from_item(current)
-        if not tile:
-            return
-
-        # Keep index in sync for other code that still uses it
-        row = self.tile_list.row(current)
-        self.current_tile_index = row
-
-        # Load selected tile into editor and canvas
-        self.tile_editor.load_tile(profile, tile)
-        self.canvas.set_selected_index(row)
 
     def on_rule_toggled(self, item: QListWidgetItem) -> None:
         """Called when a rule checkbox is toggled."""
@@ -1761,7 +1999,7 @@ class MainWindow(QWidget):
         # Refresh the list after deletion
         self.populate_system_rules()
 
-    def on_profile_settings_changed(self, *args) -> None:
+    def on_profile_settings_changed(self, *_args) -> None:
         """User changed tile gap -> update profile + canvas."""
         profile = self.get_current_profile()
         if not profile:
@@ -1783,8 +2021,7 @@ class MainWindow(QWidget):
             self.canvas.set_profile(profile)
 
             # Apply the gap to all tile geometries
-            if hasattr(self.canvas, "_push_geometry_into_tiles"):
-                self.canvas._push_geometry_into_tiles()
+            self.canvas.apply_geometry_to_tiles()
         else:
             # No change, just ensure canvas shows current profile
             self.canvas.set_profile(profile)
@@ -1822,20 +2059,20 @@ class MainWindow(QWidget):
             QMessageBox.warning(self, "No profile", "Select a profile first.")
             return
 
-        if not hasattr(self.canvas, "export_slots_for_profile"):
-            QMessageBox.critical(self, "Error", "Canvas does not support layout export.")
-            return
-
+        # Export current leaf rectangles to profile layout slots
         slots = self.canvas.export_slots_for_profile()
-        profile.layout_slots = slots
+        if not slots:
+            QMessageBox.information(
+                self,
+                "No tiles",
+                "There are no assigned tiles in this layout to save.",
+            )
+            profile.layout_slots = []
+        else:
+            profile.layout_slots = slots
 
         # Let the canvas apply the current gap setting to all tiles.
-        # This uses the split tree + profile.tile_gap to compute
-        # the final geometry, so you get:
-        # - 'gap' pixels between tiles
-        # - 'gap' pixels between tiles and screen edges.
-        if hasattr(self.canvas, "_push_geometry_into_tiles"):
-            self.canvas._push_geometry_into_tiles()
+        self.canvas.apply_geometry_to_tiles()
 
         # Canvas already reflects the current layout; just refresh tile editor
         if self.current_tile_index is not None:
@@ -1846,23 +2083,16 @@ class MainWindow(QWidget):
         # Persist to disk
         try:
             self.engine.save_config(self.config)
-        except Exception as e:
-            QMessageBox.warning(self, "Save error", f"Failed to save layout: {e}")
+        except OSError as e:
+            # File system / IO error
+            QMessageBox.warning(self, "Save error", f"Failed to save layout:\n{e}")
             return
 
-        # Update layout buttons (load/delete now valid if previously empty)
-        self.refresh_layout_combo()
-
-        try:
-            layout_name = profile.current_layout_name
-        except Exception:
-            layout_name = ""
-        if layout_name:
-            msg = f"Layout '{layout_name}' and tile geometry have been saved."
-        else:
-            msg = "Layout and tile geometry have been saved."
-
-        QMessageBox.information(self, "Layout saved", msg)
+        QMessageBox.information(
+            self,
+            "Layout saved",
+            "Current layout has been saved to this profile and monitor.",
+        )
 
     def on_load_layout(self) -> None:
         """
@@ -1890,19 +2120,13 @@ class MainWindow(QWidget):
             return
 
         # If there are no slots in the current layout, treat as "no layout"
-        if not profile.layout_slots:
-            QMessageBox.information(
-                self,
-                "No layout",
-                "This layout has no saved geometry to delete.",
-            )
+        slots = list(profile.layout_slots)
+        if not slots:
+            QMessageBox.information(self, "No layout", "This profile has no saved layout yet.")
             return
 
-        try:
-            layout_name = profile.current_layout_name
-        except Exception:
-            layout_name = ""
-
+        data = self.layout_combo.currentData()
+        layout_name = str(data) if data is not None else self.layout_combo.currentText().strip()
         name_for_msg = layout_name or "<unnamed>"
 
         reply = QMessageBox.question(
@@ -1915,14 +2139,15 @@ class MainWindow(QWidget):
             return
 
         try:
-            if hasattr(profile, "delete_layout_by_name") and layout_name:
+            if layout_name:
                 profile.delete_layout_by_name(layout_name)
             else:
                 # Fallback: clear slots of current layout
                 profile.layout_slots = []
             self.engine.save_config(self.config)
-        except Exception as e:
-            QMessageBox.warning(self, "Save error", f"Failed to delete layout: {e}")
+        except (OSError, ValueError, RuntimeError) as e:
+            # Narrowed from 'Exception' to realistic error types
+            QMessageBox.warning(self, "Save error", f"Failed to delete layout:\n{e}")
             return
 
         # Reset canvas + layout combo
@@ -1963,11 +2188,6 @@ class MainWindow(QWidget):
         except Exception as e:
             QMessageBox.warning(self, "Save error", f"Failed to save background: {e}")
 
-    def on_canvas_tile_selected(self, idx: int) -> None:
-        """Canvas clicked a tile -> select same row in list."""
-        if 0 <= idx < self.tile_list.count():
-            self.tile_list.setCurrentRow(idx)
-
     def on_canvas_geometry_changed(self, tile_index: int) -> None:
         """
         Called when the LayoutCanvas updates the geometry of a tile
@@ -2000,112 +2220,13 @@ class MainWindow(QWidget):
             return
         self.profile_list.setCurrentRow(index)
 
-    def flush_tile_edits(self, item: Optional[QListWidgetItem] = None) -> None:
-        """
-        Push the editor's current values into the TileModel for the given item.
-        If no item is passed, it uses the currently selected item.
-        """
-        profile = self.get_current_profile()
-        if not profile:
-            return
-
-        if item is None:
-            item = self.tile_list.currentItem()
-        if not item:
-            return
-
-        tile = self._get_tile_from_item(item)
-        if not tile:
-            return
-
-        # Apply changes into that tile
-        self.tile_editor.current_profile = profile
-        self.tile_editor.current_tile = tile
-        self.tile_editor.apply_changes()
-
-        # Refresh canvas (no more _recompute_rects in the new LayoutCanvas)
-        self.canvas.update()
-
-        # Update list label
-        item.setText(tile.name or "<tile>")
-
-    def on_new_profile(self) -> None:
-        self._push_undo_state()
-
-        name, ok = self.simple_prompt("New Profile", "Profile name:")
-        if not ok or not name.strip():
-            return
-        self.config.add_profile(name.strip())
-        self.populate_profiles()
-        new_index = len(self.get_profiles()) - 1
-        self.profile_list.setCurrentRow(new_index)
-
-    def on_rename_profile(self) -> None:
-        profile = self.get_current_profile()
-        if not profile:
-            QMessageBox.warning(self, "No profile", "Select a profile to rename.")
-            return
-
-        old_name = profile.name or "<unnamed>"
-
-        new_name, ok = self.simple_prompt("Rename Profile", "New profile name:", default=old_name)
-        if not ok:
-            return
-
-        new_name = new_name.strip()
-        if not new_name:
-            QMessageBox.warning(self, "Invalid name", "Profile name cannot be empty.")
-            return
-
-        # Check for duplicate names
-        for p in self.get_profiles():
-            if p is profile:
-                continue
-            if p.name == new_name:
-                QMessageBox.warning(
-                    self,
-                    "Duplicate name",
-                    f"Another profile is already called '{new_name}'.",
-                )
-                return
-
-        self._push_undo_state()
-        profile.name = new_name
-
-        # Update the list item text
-        current_item = self.profile_list.currentItem()
-        if current_item is not None:
-            current_item.setText(new_name)
-
-        # Persist + refresh rule list UI
-        self.engine.save_config(self.config)
-        self.populate_system_rules()
-
-    def on_new_tile(self) -> None:
-        profile = self.get_current_profile()
-        if not profile:
-            QMessageBox.warning(self, "No profile", "Select a profile first.")
-            return
-
-        self._push_undo_state()
-
-        profile.add_tile()
-        self.populate_tiles(self.current_profile_index)
-
-        new_tile_index = len(profile.tiles) - 1
-        self.current_tile_index = new_tile_index
-
-        if new_tile_index >= 0:
-            self.tile_list.setCurrentRow(new_tile_index)
-            self.canvas.set_profile(profile)
-
     def on_save_config(self) -> None:
         """
         Save the current configuration to disk.
         If there is a current profile, validate it first.
         (You could also validate all profiles here later.)
         """
-        self.flush_tile_edits()
+        self.tile_controller.flush_tile_edits()
 
         profile = self.get_current_profile()
         if profile is not None:
@@ -2132,8 +2253,9 @@ class MainWindow(QWidget):
     def on_apply_profile(self) -> None:
         """
         Validate current profile, then save config and (re)apply KWin rules.
+        Also refreshes the KWin rules list in the UI.
         """
-        self.flush_tile_edits()
+        self.tile_controller.flush_tile_edits()
 
         profile = self.validate_current_profile("apply this profile")
         if not profile:
@@ -2141,7 +2263,13 @@ class MainWindow(QWidget):
 
         try:
             self.engine.apply_profile_rules(self.config, profile)
-            QMessageBox.information(self, "Applied", f"KWin rules for '{profile.name}' refreshed.")
+            # Refresh the KWin rules list so the UI reflects the new rules
+            self.populate_system_rules()
+            QMessageBox.information(
+                self,
+                "Applied",
+                f"KWin rules for '{profile.name}' refreshed.",
+            )
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Failed to apply profile:\n{e}")
 
@@ -2149,7 +2277,7 @@ class MainWindow(QWidget):
         """
         Validate current profile, then launch only that profile's commands.
         """
-        self.flush_tile_edits()
+        self.tile_controller.flush_tile_edits()
 
         profile = self.validate_current_profile("launch its apps")
         if not profile:
@@ -2213,118 +2341,6 @@ class MainWindow(QWidget):
                 f"Failed to launch tile '{tile.name or '<tile>'}':\n{e}",
             )
 
-    def on_delete_profile(self) -> None:
-        self._push_undo_state()
-
-        profile = self.get_current_profile()
-        if not profile:
-            QMessageBox.warning(self, "No profile", "Select a profile to delete.")
-            return
-
-        name = profile.name or "<unnamed>"
-        reply = QMessageBox.question(
-            self,
-            "Delete Profile",
-            f"Delete profile '{name}' and its KWin Window Rules?",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-        )
-        if reply != QMessageBox.StandardButton.Yes:
-            return
-
-        # Try to remove profile rules first
-        try:
-            self.engine.remove_profile_rules(profile)
-        except Exception as e:
-            QMessageBox.warning(
-                self,
-                "Warning",
-                f"Failed to remove KWin rules for '{name}':\n{e}\n"
-                "The profile will still be removed from the config.",
-            )
-
-        if self.current_profile_index is not None:
-            self.config.remove_profile(self.current_profile_index)
-
-        self.current_profile_index = None
-        self.current_tile_index = None
-
-        if not self._save_config_with_error("save config after deleting profile"):
-            return
-
-        # Refresh lists and clear the now-invalid tile selection/editor
-        self._reload_profiles_and_rules()
-        self._clear_tile_selection_and_editor()
-        self.load_profile_settings_to_ui(None)
-
-        QMessageBox.information(self, "Deleted", f"Profile '{name}' deleted.")
-
-    def on_delete_tile(self) -> None:
-        profile = self.get_current_profile()
-        if not profile:
-            return
-
-        current_item = self.tile_list.currentItem()
-        if not current_item:
-            return
-
-        tile = self._get_tile_from_item(current_item)
-        if not tile:
-            return
-
-        tiles = profile.tiles
-        try:
-            idx = tiles.index(tile)
-        except ValueError:
-            # Fallback: row-based deletion
-            idx = self.tile_list.currentRow()
-
-        if not (0 <= idx < len(tiles)):
-            return
-
-        # 🔸 Take snapshot BEFORE actually deleting anything
-        self._push_undo_state()
-
-        reply = QMessageBox.question(
-            self,
-            "Delete Tile",
-            f"Delete tile '{tile.name or '<tile>'}'?",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-        )
-        if reply != QMessageBox.StandardButton.Yes:
-            # Optional: if you want to avoid a useless undo entry when user cancels:
-            # if self.undo_stack:
-            #     self.undo_stack.pop()
-            # self._update_undo_redo_buttons()
-            return
-
-        # Remove from profile by the *real* index of that TileModel
-        profile.remove_tile(idx)
-
-        # Update selection index
-        if len(profile.tiles) == 0:
-            self.current_tile_index = None
-        else:
-            if idx >= len(profile.tiles):
-                idx = len(profile.tiles) - 1
-            self.current_tile_index = idx
-
-        # Refresh UI
-        self.populate_tiles(self.current_profile_index)
-        self.canvas.set_profile(profile)
-
-        if self.current_tile_index is not None:
-            self.tile_list.setCurrentRow(self.current_tile_index)
-            new_tile = profile.tiles[self.current_tile_index]
-            self.tile_editor.load_tile(profile, new_tile)
-        else:
-            self.tile_editor.clear()
-
-        # Persist config (best-effort)
-        try:
-            self.engine.save_config(self.config)
-        except Exception:
-            pass
-
     def autostart_profile(self, profile_name: str) -> None:
         """
         Called on startup when launched with --autostart-profile <name>.
@@ -2337,27 +2353,36 @@ class MainWindow(QWidget):
         No dialogs are shown; errors go to stderr so they don't block login.
         """
         profiles = self.config.profiles
-        target_idx = None
+
+        # 1) Guard: no profiles at all
+        if not profiles:
+            logger.error("[Onigiri Autostart] No profiles available in config.")
+            return
+
+        target_idx: Optional[int] = None
         target_profile = None
 
+        # 2) Search for the matching profile
         for i, p in enumerate(profiles):
             if p.name == profile_name:
                 target_idx = i
                 target_profile = p
                 break
 
+        # 3) If nothing was found, log once and bail
+        if target_profile is None or target_idx is None:
             logger.error(
                 "[Onigiri Autostart] Profile '%s' not found in config.",
                 profile_name,
             )
             return
 
-        # Keep internal UI state consistent
+        # 4) Keep internal UI state consistent
         self.current_profile_index = target_idx
         if 0 <= target_idx < self.profile_list.count():
             self.profile_list.setCurrentRow(target_idx)
 
-        # Apply KWin rules for that profile
+        # 5) Apply KWin rules for that profile
         try:
             self.engine.apply_profile_rules(self.config, target_profile)
         except Exception as e:
@@ -2367,7 +2392,7 @@ class MainWindow(QWidget):
                 e,
             )
 
-        # Launch the apps/commands for that profile
+        # 6) Launch the apps/commands for that profile
         try:
             self.engine.launch_profile_apps(self.config, target_profile)
         except Exception as e:
@@ -2401,11 +2426,12 @@ class MainWindow(QWidget):
           - applies the given profile
           - launches apps for that profile
         """
+
         # Save current config so the autostart run sees the latest data
         try:
             self.engine.save_config(self.config)
-        except Exception:
-            pass
+        except (OSError, ValueError, RuntimeError) as e:
+            logger.warning("Failed to save config before autostart: %s", e)
 
         config_dir = QStandardPaths.writableLocation(
             QStandardPaths.StandardLocation.ConfigLocation
@@ -2418,16 +2444,16 @@ class MainWindow(QWidget):
         exe = sys.executable
         script_path = os.path.abspath(__file__)
 
-        # 👇 IMPORTANT: pass --autostart-profile to onigiri_ui.py
         contents = f"""[Desktop Entry]
-Type=Application
-Exec={exe} "{script_path}" --autostart-profile "{profile_name}"
-Hidden=false
-NoDisplay=false
-X-GNOME-Autostart-enabled=true
-Name=Onigiri
-Comment=Start Onigiri tiler and apply profile '{profile_name}'
-"""
+    Type=Application
+    Exec={exe} "{script_path}" --autostart-profile "{profile_name}"
+    Hidden=false
+    NoDisplay=false
+    X-GNOME-Autostart-enabled=true
+    Name=Onigiri
+    Comment=Start Onigiri tiler and apply profile '{profile_name}'
+    """
+
         try:
             with open(desktop_path, "w", encoding="utf-8") as f:
                 f.write(contents)
@@ -2436,7 +2462,7 @@ Comment=Start Onigiri tiler and apply profile '{profile_name}'
                 "Autostart created",
                 f"Autostart file created at:\n{desktop_path}",
             )
-        except Exception as e:
+        except OSError as e:
             QMessageBox.critical(
                 self,
                 "Error",
@@ -2444,7 +2470,7 @@ Comment=Start Onigiri tiler and apply profile '{profile_name}'
             )
 
     def on_create_autostart(self) -> None:
-        self.flush_tile_edits()
+        self.tile_controller.flush_tile_edits()
         profile = self.get_current_profile()
         if not profile:
             QMessageBox.warning(self, "No profile", "Select a profile first.")
@@ -2488,100 +2514,6 @@ def main() -> int:
     win.hide()
     return app.exec()
 
-class ProfilesDialog(QDialog):
-    def __init__(self, main: "MainWindow"):
-        super().__init__(main)
-        self.main = main
-        self.setWindowTitle("Profiles")
-        self.setModal(False)
-        self.resize(500, 400)
-
-        layout = QVBoxLayout(self)
-
-        group = QGroupBox("Profiles")
-        g_layout = QVBoxLayout()
-        g_layout.addWidget(self.main.profile_list)
-
-        buttons_row = QHBoxLayout()
-        buttons_row.addWidget(self.main.btn_new_profile)
-        buttons_row.addWidget(self.main.btn_rename_profile)
-        buttons_row.addWidget(self.main.btn_delete_profile)
-        buttons_row.addStretch(1)
-        g_layout.addLayout(buttons_row)
-
-        group.setLayout(g_layout)
-        layout.addWidget(group)
-
-        close_btn = QPushButton("Close")
-        close_btn.clicked.connect(self.close)
-        layout.addWidget(close_btn, alignment=Qt.AlignmentFlag.AlignRight)
-
-
-class TilesDialog(QDialog):
-    def __init__(self, main: "MainWindow"):
-        super().__init__(main)
-        self.main = main
-        self.setWindowTitle("Tiles")
-        self.setModal(False)
-        self.resize(900, 600)
-
-        layout = QVBoxLayout(self)
-
-        # Left: tiles list + buttons
-        tiles_group = QGroupBox("Tiles in Profile")
-        tiles_group_layout = QVBoxLayout()
-        tiles_group_layout.addWidget(self.main.tile_list)
-
-        tile_buttons_row = QHBoxLayout()
-        tile_buttons_row.addWidget(self.main.btn_new_tile)
-        tile_buttons_row.addWidget(self.main.btn_delete_tile)
-        tile_buttons_row.addStretch(1)
-        tiles_group_layout.addLayout(tile_buttons_row)
-        tiles_group.setLayout(tiles_group_layout)
-
-        # Right: tile editor
-        editor_group = QGroupBox("Tile Editor")
-        editor_layout = QVBoxLayout()
-        editor_layout.addWidget(self.main.tile_editor)
-        editor_group.setLayout(editor_layout)
-
-        # Combined row
-        content_row = QHBoxLayout()
-        content_row.addWidget(tiles_group, stretch=1)
-        content_row.addWidget(editor_group, stretch=2)
-
-        layout.addLayout(content_row)
-
-        close_btn = QPushButton("Close")
-        close_btn.clicked.connect(self.close)
-        layout.addWidget(close_btn, alignment=Qt.AlignmentFlag.AlignRight)
-
-
-class KWinRulesDialog(QDialog):
-    def __init__(self, main: "MainWindow"):
-        super().__init__(main)
-        self.main = main
-        self.setWindowTitle("KWin Rules")
-        self.setModal(False)
-        self.resize(600, 500)
-
-        layout = QVBoxLayout(self)
-
-        rules_group = QGroupBox("KWin Rules (enabled/disabled)")
-        rules_layout = QVBoxLayout()
-        rules_layout.addWidget(self.main.rules_list)
-
-        rule_buttons_row = QHBoxLayout()
-        rule_buttons_row.addWidget(self.main.btn_delete_rule)
-        rule_buttons_row.addStretch(1)
-        rules_layout.addLayout(rule_buttons_row)
-
-        rules_group.setLayout(rules_layout)
-        layout.addWidget(rules_group)
-
-        close_btn = QPushButton("Close")
-        close_btn.clicked.connect(self.close)
-        layout.addWidget(close_btn, alignment=Qt.AlignmentFlag.AlignRight)
 
 if __name__ == "__main__":
     raise SystemExit(main())

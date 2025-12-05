@@ -515,6 +515,7 @@ class ConfigValidator:
     Returns lists of human-readable error messages.
     """
 
+    # noinspection PyMethodMayBeStatic
     def validate_tile(self, tile: TileModel) -> List[str]:
         errors: List[str] = []
         tile_label = tile.name or "<tile>"

@@ -4,7 +4,7 @@ import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 import configparser
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Union
 from uuid import uuid4
 import time
 import re
@@ -96,6 +96,7 @@ class ProfileStore:
 
     # --- typed model helpers ---
 
+    # noinspection PyMethodMayBeStatic
     def _match_from_dict(self, d: Any) -> MatchSpec:
         if not isinstance(d, dict):
             return MatchSpec()
@@ -181,8 +182,8 @@ def _get_xrandr_monitors():
             text=True,
             check=True,
         )
-    except Exception:
-        # If xrandr is not available or fails, just return empty.
+    except (FileNotFoundError, subprocess.CalledProcessError):
+        # xrandr missing or failed → no monitors
         return monitors
 
     for line in result.stdout.splitlines():
@@ -242,6 +243,7 @@ class KWinRulesManager:
             cfg.read(self._rules_path, encoding="utf-8")
         return cfg
 
+    # noinspection PyMethodMayBeStatic
     def _get_rules_list(self, cfg: configparser.ConfigParser) -> List[str]:
         """Return the list of rule IDs from [General].rules (UUIDs)."""
         if not cfg.has_section("General"):
@@ -252,6 +254,7 @@ class KWinRulesManager:
             return []
         return [r for r in raw.split(",") if r]
 
+    # noinspection PyMethodMayBeStatic
     def _set_rules_list(self, cfg: configparser.ConfigParser, ids: List[str]) -> None:
         """Update [General].rules and [General].count."""
         if not cfg.has_section("General"):
@@ -275,6 +278,7 @@ class KWinRulesManager:
 
     # --- section helpers ---
 
+    # noinspection PyMethodMayBeStatic
     def _find_section_by_description(
         self, cfg: configparser.ConfigParser, desc: str
     ) -> Optional[str]:
@@ -426,6 +430,40 @@ class KWinRulesManager:
             self.save_config(cfg)
             _trigger_kwin_reconfigure()
 
+    def remove_onigiri_rules(self) -> None:
+        """
+        Remove ALL KWin rules created by Onigiri/KWinTiler, for ANY profile.
+        This is used when activating a new profile so only one layout is active.
+        """
+        cfg = self.load_config()
+        rules_list = self._get_rules_list(cfg)
+        to_remove_ids: List[str] = []
+
+        for section in cfg.sections():
+            if section == "General":
+                continue
+            if not cfg.has_option(section, "Description"):
+                continue
+
+            desc = cfg.get(section, "Description", fallback="")
+            # legacy prefix and new prefix
+            if desc.startswith("KWinTiler:") or desc.startswith("Onigiri:"):
+                to_remove_ids.append(section)
+
+        if not to_remove_ids:
+            return
+
+        # Drop these from [General].rules list
+        rules_list = [r for r in rules_list if r not in to_remove_ids]
+        self._set_rules_list(cfg, rules_list)
+
+        # Drop their sections
+        for sec in to_remove_ids:
+            cfg.remove_section(sec)
+
+        self.save_config(cfg)
+        _trigger_kwin_reconfigure()
+
 
 # ======================= Engine: apply + launch =======================
 
@@ -448,6 +486,18 @@ class OnigiriEngine:
         if not profile.tiles:
             logger.info("Profile '%s' has no tiles; nothing to apply.", name)
             return
+
+        # IMPORTANT:
+        # Before applying this profile, remove ALL existing Onigiri/KWinTiler rules
+        # so only one layout is ever active.
+        try:
+            self._rules.remove_onigiri_rules()
+        except Exception as e:
+            logger.error(
+                "Failed to clear existing Onigiri rules before applying '%s': %s",
+                name,
+                e,
+            )
 
         cfg = self._rules.load_config()
 
@@ -538,7 +588,7 @@ class OnigiriEngine:
         # Now poke KWin so it re-reads rules and re-applies them to existing windows
         _trigger_kwin_reconfigure()
 
-    def remove_profile_rules(self, profile) -> None:
+    def remove_profile_rules(self, profile: Union["Profile", str]) -> None:
         """
         Remove all KWin rules associated with the given profile.
 
@@ -546,12 +596,9 @@ class OnigiriEngine:
         - a profile name string, or
         - a Profile instance.
         """
-        # Support both string and Profile object for safety
-        try:
-            # If it's a dataclass Profile, use its name
-            profile_name = profile.name  # type: ignore[attr-defined]
-        except AttributeError:
-            # Otherwise assume it's already a name (string-like)
+        if isinstance(profile, Profile):
+            profile_name: str = profile.name
+        else:
             profile_name = str(profile)
 
         self._rules.remove_profile_rules(profile_name)

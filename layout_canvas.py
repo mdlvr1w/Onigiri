@@ -1,9 +1,10 @@
-from typing import Any, Dict, List, Optional
+from typing import Any, Optional
 import logging
 
-from PyQt6.QtWidgets import QWidget, QMenu, QApplication
+from PyQt6.QtWidgets import QWidget, QMenu, QApplication, QInputDialog
+from PyQt6.QtGui import QAction
 from PyQt6.QtCore import Qt, pyqtSignal, QPointF
-from PyQt6.QtGui import QPainter, QColor, QPen, QBrush, QMouseEvent, QPixmap, QGuiApplication
+from PyQt6.QtGui import QMouseEvent, QPixmap
 
 from models import ProfileModel
 
@@ -20,8 +21,8 @@ class LayoutCanvas(QWidget):
     - No per-slot manual geometry; all rects are derived from the tree.
     """
 
-    tileSelected = pyqtSignal(int)       # index in profile.tiles, or -1 if none
-    geometryChanged = pyqtSignal(int)    # index in profile.tiles whose geometry changed
+    tileSelected: pyqtSignal = pyqtSignal(int)
+    geometryChanged: pyqtSignal = pyqtSignal(int)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -323,12 +324,13 @@ class LayoutCanvas(QWidget):
 
         # Monitor-specific background image (if configured)
         bg_path = ""
-        try:
-            backgrounds = profile.monitor_backgrounds
-            if isinstance(backgrounds, dict):
-                bg_path = backgrounds.get(profile.monitor, "") or ""
-        except Exception:
-            bg_path = ""
+        backgrounds = getattr(profile, "monitor_backgrounds", None)
+        monitor_name = getattr(profile, "monitor", None)
+
+        if isinstance(backgrounds, dict) and monitor_name is not None:
+            value = backgrounds.get(monitor_name, "")
+            if isinstance(value, str):
+                bg_path = value or ""
 
         if bg_path:
             self.set_background_image(bg_path)
@@ -457,14 +459,13 @@ class LayoutCanvas(QWidget):
                 r_max_y = max(r["y"] + r["h"] for r in right)
                 right_bounds = (r_min_x, r_min_y, r_max_x - r_min_x, r_max_y - r_min_y)
 
-                node: dict[str, Any] = {
+                return {
                     "type": "split",
                     "orientation": "v",
                     "ratio": (split_x - x0) / float(w0) if w0 > 0 else 0.5,
+                    "first": self._build_tree_from_rects(left, left_bounds, eps),
+                    "second": self._build_tree_from_rects(right, right_bounds, eps),
                 }
-                node["first"] = self._build_tree_from_rects(left, left_bounds, eps)
-                node["second"] = self._build_tree_from_rects(right, right_bounds, eps)
-                return node
 
         # ----- try horizontal splits -----
         ys = set()
@@ -504,14 +505,13 @@ class LayoutCanvas(QWidget):
                 b_max_y = max(r["y"] + r["h"] for r in bottom)
                 bottom_bounds = (b_min_x, b_min_y, b_max_x - b_min_x, b_max_y - b_min_y)
 
-                node = {
+                return {
                     "type": "split",
                     "orientation": "h",
                     "ratio": (split_y - y0) / float(h0) if h0 > 0 else 0.5,
+                    "first": self._build_tree_from_rects(top, top_bounds, eps),
+                    "second": self._build_tree_from_rects(bottom, bottom_bounds, eps),
                 }
-                node["first"] = self._build_tree_from_rects(top, top_bounds, eps)
-                node["second"] = self._build_tree_from_rects(bottom, bottom_bounds, eps)
-                return node
 
         # Fallback: treat this region as a single leaf (geometry will still
         # be correct due to export_slots_for_profile using computed rects).
@@ -538,6 +538,14 @@ class LayoutCanvas(QWidget):
                 }
             )
         return out
+
+    def apply_geometry_to_tiles(self) -> None:
+        """
+        Public wrapper to recompute and push geometry into all tiles.
+        This avoids calling the protected member _push_geometry_into_tiles
+        from outside the class.
+        """
+        self._push_geometry_into_tiles()
 
     def set_selected_index(self, idx: Optional[int]) -> None:
         """
@@ -671,7 +679,8 @@ class LayoutCanvas(QWidget):
             or self._active_split_orientation is None
             or self._last_mouse_pos is None
         ):
-            return super().mouseMoveEvent(event)
+            super().mouseMoveEvent(event)
+            return
 
         pos = event.position()
         dx_canvas = pos.x() - self._last_mouse_pos.x()
@@ -695,14 +704,30 @@ class LayoutCanvas(QWidget):
             return
 
         # minimal child size in pixels (same value as used in _rebuild_from_tree)
-        min_size = self._min_leaf_size
-        snap_dist = 8.0
+        min_size: float = float(self._min_leaf_size)
+        snap_dist: float = 8.0
 
         if self._active_split_orientation == "v":
             # move x_split
-            parent_x = info["parent_x"]
-            parent_w = info["parent_w"]
-            x_old = info["x1"]
+            parent_x_val = info.get("parent_x")
+            parent_w_val = info.get("parent_w")
+            x_old_val = info.get("x1")
+            parent_y_val = info.get("parent_y")
+            parent_h_val = info.get("parent_h")
+
+            # If geometry is somehow incomplete, bail out safely
+            if (
+                parent_x_val is None or parent_w_val is None or x_old_val is None
+                or parent_y_val is None or parent_h_val is None
+            ):
+                return
+
+            parent_x: float = float(parent_x_val)
+            parent_w: float = float(parent_w_val)
+            x_old: float = float(x_old_val)
+            parent_y: float = float(parent_y_val)
+            parent_h: float = float(parent_h_val)
+
             x_new = x_old + dx_world
 
             # clamp inside parent with min_size
@@ -718,8 +743,8 @@ class LayoutCanvas(QWidget):
                 if s["orientation"] != "v" or s["node"] is self._active_split_node:
                     continue
                 # Only splits that overlap vertically with this parent region
-                if not (s["y2"] <= info["parent_y"] or s["y1"] >= info["parent_y"] + info["parent_h"]):
-                    candidates.append(s["x1"])
+                if not (s["y2"] <= parent_y or s["y1"] >= parent_y + parent_h):
+                    candidates.append(float(s["x1"]))
             for cx in candidates:
                 if abs(cx - x_new) <= snap_dist:
                     x_new = cx
@@ -737,29 +762,48 @@ class LayoutCanvas(QWidget):
             self._active_split_node["ratio"] = new_ratio
 
         else:
-            # horizontal split, move y_split
-            parent_y = info["parent_y"]
-            parent_h = info["parent_h"]
-            y_old = info["y1"]
+            parent_y_val = info.get("parent_y")
+            parent_h_val = info.get("parent_h")
+            y_old_val = info.get("y1")
+            parent_x_val = info.get("parent_x")
+            parent_w_val = info.get("parent_w")
+
+            # If geometry is somehow incomplete, bail out safely
+            if (
+                parent_y_val is None or parent_h_val is None or y_old_val is None
+                or parent_x_val is None or parent_w_val is None
+            ):
+                return
+
+            parent_y: float = float(parent_y_val)
+            parent_h: float = float(parent_h_val)
+            y_old: float = float(y_old_val)
+            parent_x: float = float(parent_x_val)
+            parent_w: float = float(parent_w_val)
+
             y_new = y_old + dy_world
 
+            # clamp inside parent with min_size
             top_min = parent_y + min_size
             bottom_max = parent_y + parent_h - min_size
             if bottom_max <= top_min:
                 return
             y_new = max(top_min, min(y_new, bottom_max))
 
+            # magnetic snap against other horizontal lines that overlap this parent rect
             candidates: list[float] = []
             for s in self._split_lines:
                 if s["orientation"] != "h" or s["node"] is self._active_split_node:
                     continue
-                if not (s["x2"] <= info["parent_x"] or s["x1"] >= info["parent_x"] + info["parent_w"]):
-                    candidates.append(s["y1"])
+                # Only splits that overlap horizontally with this parent region
+                if not (s["x2"] <= parent_x or s["x1"] >= parent_x + parent_w):
+                    candidates.append(float(s["y1"]))
             for cy in candidates:
                 if abs(cy - y_new) <= snap_dist:
                     y_new = cy
                     break
 
+            # derive new ratio and clamp based on _min_leaf_size
             new_ratio = (y_new - parent_y) / parent_h
 
             min_ratio = self._min_leaf_size / max(parent_h, 1.0)
@@ -1153,6 +1197,7 @@ class LayoutCanvas(QWidget):
             )
             self.geometryChanged.emit(idx)
 
+    # noinspection PyMethodMayBeStatic
     def _find_tile_index_by_name(self, profile: ProfileModel, name: str) -> Optional[int]:
         tiles = profile.tiles
         for i, t in enumerate(tiles):

@@ -13,12 +13,13 @@ class OnigiriService:
     Thin wrapper around the onigiri engine module so the UI
     doesn't call onigiri.* all over the place.
     """
-
+    # noinspection PyMethodMayBeStatic
     def load_config(self) -> ConfigModel:
         """Load config from JSON and wrap it in ConfigModel."""
         raw = onigiri.load_profiles()
         return ConfigModel(raw)
 
+    # noinspection PyMethodMayBeStatic
     def save_config(self, config: ConfigModel) -> None:
         """Persist ConfigModel back to JSON."""
         onigiri.save_profiles(config.to_dict())
@@ -27,14 +28,16 @@ class OnigiriService:
 
     def apply_profile_rules(self, config: ConfigModel, profile: ProfileModel) -> None:
         """
-        Save config, clear old rules for this profile and re-apply KWin rules.
+        Save config and (re)apply KWin rules for this profile.
+
+        Note: apply_profile() now clears ALL Onigiri/KWinTiler rules first,
+        so only this profile's layout is active.
         """
         name = profile.name
         if not name:
             raise ValueError("Profile needs a name before applying rules.")
 
         self.save_config(config)
-        onigiri.remove_profile_rules(name)
         onigiri.apply_profile(name)
 
     def launch_profile_apps(self, config: ConfigModel, profile: ProfileModel) -> None:
@@ -65,6 +68,7 @@ class OnigiriService:
         # 3) Launch the configured commands/apps
         onigiri.launch_profile_commands(name)
 
+    # noinspection PyMethodMayBeStatic
     def remove_profile_rules(self, profile: ProfileModel) -> None:
         """
         Remove KWin rules for a profile (used when deleting a profile).
@@ -76,15 +80,19 @@ class OnigiriService:
 
     # ----- KWin rules list / toggle -----
 
+    # noinspection PyMethodMayBeStatic
     def list_rules(self) -> List[Dict[str, Any]]:
         return onigiri.list_kwin_rules()
 
+    # noinspection PyMethodMayBeStatic
     def set_rule_enabled(self, rule_id: str, enabled: bool) -> None:
         onigiri.set_rule_enabled(rule_id, enabled)
 
+    # noinspection PyMethodMayBeStatic
     def delete_rule(self, rule_id: str) -> None:
         onigiri.delete_kwin_rule(rule_id)
 
+    # noinspection PyMethodMayBeStatic
     def launch_tile_command(self, tile: TileModel) -> None:
         """
         Launch only this tile's command.
