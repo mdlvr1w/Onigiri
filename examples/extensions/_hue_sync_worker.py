@@ -8,7 +8,7 @@ import sys
 import threading
 import time
 
-from PyQt6.QtCore import QObject, QTimer, pyqtSignal
+from PyQt6.QtCore import QObject, QTimer, Qt, pyqtSignal
 from PyQt6.QtGui import QGuiApplication
 from PyQt6.QtMultimedia import QMediaCaptureSession, QScreenCapture, QVideoSink
 
@@ -109,14 +109,22 @@ class Runtime(QObject):
         self.done = threading.Event()
         self.lock = threading.Lock()
         self.regions = None
-        self.last_frame = 0.0
         self.error = ""
         self.capture = QScreenCapture(self)
+        # Limit capture itself, not just Python processing after GPU readback.
+        # Older Qt versions do not expose this setting.
+        if hasattr(self.capture, "setMaximumFrameRate"):
+            self.capture.setMaximumFrameRate(25.0)
         self.sink = QVideoSink(self)
         self.session = QMediaCaptureSession(self)
         self.session.setScreenCapture(self.capture)
         self.session.setVideoSink(self.sink)
-        self.sink.videoFrameChanged.connect(self.frame)
+        # Poll the latest frame instead of queuing one callback (and retaining a
+        # video buffer) for every frame produced by a high-refresh-rate display.
+        self.sample_timer = QTimer(self)
+        self.sample_timer.setTimerType(Qt.TimerType.PreciseTimer)
+        self.sample_timer.timeout.connect(self.frame)
+        self.sample_timer.start(40)
         self.capture.errorOccurred.connect(self.capture_error)
         self.capture.activeChanged.connect(self.capture_active)
         self.captureRequested.connect(self.capture.start)
@@ -133,11 +141,12 @@ class Runtime(QObject):
             pass
         self.stop_event.set()
 
-    def frame(self, frame):
-        now = time.monotonic()
-        if now - self.last_frame < 1 / 25 or self.stop_event.is_set():
+    def frame(self):
+        if self.stop_event.is_set():
             return
-        self.last_frame = now
+        frame = self.sink.videoFrame()
+        if not frame.isValid():
+            return
         regions = sample_regions(frame.toImage())
         if regions is not None:
             with self.lock:

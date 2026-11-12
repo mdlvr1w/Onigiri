@@ -84,6 +84,26 @@ class LifecycleTests(unittest.TestCase):
 
 
 class SyncTests(unittest.TestCase):
+    def test_capture_samples_latest_frame_and_stops_without_readback(self):
+        from unittest.mock import Mock
+        from _hue_sync_worker import Runtime
+
+        sink = Mock()
+        runtime = SimpleNamespace(stop_event=threading.Event(), sink=sink,
+                                  lock=threading.Lock(), regions=None)
+        sink.videoFrame.return_value.isValid.return_value = False
+        with patch('_hue_sync_worker.sample_regions') as sample:
+            Runtime.frame(runtime)
+            sample.assert_not_called()
+            sink.videoFrame.return_value.isValid.return_value = True
+            sample.return_value = ((10, 20, 30),) * 3
+            Runtime.frame(runtime)
+            self.assertEqual(runtime.regions, sample.return_value)
+            sink.videoFrame.reset_mock()
+            runtime.stop_event.set()
+            Runtime.frame(runtime)
+            sink.videoFrame.assert_not_called()
+
     def test_pair_upgrade_preserves_assignments_and_old_config(self):
         old = HueSettings(bridge_ip="127.0.0.1", username="old", blue=["1"], purple=["2"])
         upgraded = pair_entertainment(old, post=lambda: [{"success": {"username": "new", "clientkey": "ab" * 16}}])
