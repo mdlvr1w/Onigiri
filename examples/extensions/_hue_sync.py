@@ -24,6 +24,7 @@ def normalized_settings(settings):
     return {
         "area": str(settings.get("area") or "").strip(),
         "brightness": bounded(settings.get("brightness"), 1, 100, 60),
+        "capture_fps": bounded(settings.get("capture_fps"), 5, 25, 15),
         "smoothing": bounded(settings.get("smoothing"), 0, 95, 65),
         "whole_screen": bool(settings.get("whole_screen", False)),
     }

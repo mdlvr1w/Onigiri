@@ -11,6 +11,7 @@ def fields():
     return [
         {"id": "area", "type": "text", "label": "Entertainment area name or ID (blank if only one)"},
         {"id": "brightness", "type": "number", "label": "Brightness (%)", "min": 1, "max": 100, "default": 60},
+        {"id": "capture_fps", "type": "number", "label": "Capture FPS (lower reduces system load)", "min": 5, "max": 25, "default": 15},
         {"id": "smoothing", "type": "number", "label": "Smoothing (%)", "min": 0, "max": 95, "default": 65},
         {"id": "whole_screen", "type": "bool", "label": "One average color for all lights", "default": False},
     ]

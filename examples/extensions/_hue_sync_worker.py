@@ -110,11 +110,12 @@ class Runtime(QObject):
         self.lock = threading.Lock()
         self.regions = None
         self.error = ""
+        capture_fps = normalized_settings(config.get("settings", {}))["capture_fps"]
         self.capture = QScreenCapture(self)
         # Limit capture itself, not just Python processing after GPU readback.
         # Older Qt versions do not expose this setting.
         if hasattr(self.capture, "setMaximumFrameRate"):
-            self.capture.setMaximumFrameRate(25.0)
+            self.capture.setMaximumFrameRate(float(capture_fps))
         self.sink = QVideoSink(self)
         self.session = QMediaCaptureSession(self)
         self.session.setScreenCapture(self.capture)
@@ -124,7 +125,7 @@ class Runtime(QObject):
         self.sample_timer = QTimer(self)
         self.sample_timer.setTimerType(Qt.TimerType.PreciseTimer)
         self.sample_timer.timeout.connect(self.frame)
-        self.sample_timer.start(40)
+        self.sample_timer.start(round(1000 / capture_fps))
         self.capture.errorOccurred.connect(self.capture_error)
         self.capture.activeChanged.connect(self.capture_active)
         self.captureRequested.connect(self.capture.start)

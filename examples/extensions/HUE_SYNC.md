@@ -65,7 +65,12 @@ worker. Screen selection is handled by KDE, not by a stored monitor number.
 No frames are recorded or sent to the bridge: only sampled colors are streamed
 locally. Protected content and HDR color fidelity are not guaranteed.
 
-The extension samples at up to 25 frames per second, trims near-black outer
+Capture defaults to 15 FPS; the Capture FPS control allows 5–25 FPS. Lower it
+to reduce capture/compositor load when gaming. Qt 6.12 or newer also limits
+the capture source itself; older Qt versions only limit sampling. Restart sync
+after changing this setting. The light stream still updates at 25 FPS.
+
+The extension samples the latest frame, trims near-black outer
 borders, and smooths color changes. This is a target rate, not a latency guarantee.
 Status and runtime failures appear in the main status bar and extension panel.
 Other active Hue sync sessions must be stopped first; Onigiri does not deliberately

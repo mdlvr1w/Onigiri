@@ -84,6 +84,12 @@ class LifecycleTests(unittest.TestCase):
 
 
 class SyncTests(unittest.TestCase):
+    def test_capture_rate_has_safe_default_and_bounds(self):
+        self.assertEqual(normalized_settings({})['capture_fps'], 15)
+        self.assertEqual(normalized_settings({'capture_fps': 0})['capture_fps'], 5)
+        self.assertEqual(normalized_settings({'capture_fps': 120})['capture_fps'], 25)
+        self.assertEqual(normalized_settings({'capture_fps': 'invalid'})['capture_fps'], 15)
+
     def test_capture_samples_latest_frame_and_stops_without_readback(self):
         from unittest.mock import Mock
         from _hue_sync_worker import Runtime
