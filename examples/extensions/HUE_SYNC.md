@@ -55,7 +55,12 @@ Existing blue/purple assignments remain available for static Hue scenes.
 
 1. Create or select a scene and enable **Hue screen sync**.
 2. Enter the Entertainment area's name or ID. Leave blank only if there is one area.
-3. Set brightness and smoothing. Optionally use one average color for every light.
+3. Set brightness and smoothing. **Midtone lift** is an optional 0–100 boost:
+   0 keeps the original behavior; higher values brighten dim sampled colors while
+   keeping black at black, full-intensity colors unchanged, and RGB ratios intact.
+   The brightness setting still caps output. Try 30–50 as a starting point and
+   apply/update sync to use the new setting.
+   Optionally use one average color for every light.
 4. Select the scene’s card, then click **Apply** above the sidebar.
 5. On Wayland, KDE asks which screen to share. Select one monitor and allow capture.
 

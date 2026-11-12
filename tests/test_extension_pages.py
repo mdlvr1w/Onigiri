@@ -161,10 +161,11 @@ class ExtensionPageTests(unittest.TestCase):
             with patch('_hue_page.load_hue', return_value=HueSettings()), patch('_hue_sync.SyncProcess') as worker:
                 ctx = context(info, folder)
                 page = create_extension_page(info, ctx)
-                page.editor.set_values({'area':'Workstation','brightness':85})
+                page.editor.set_values({'area':'Workstation','brightness':85,'midtone_lift':35})
                 page.apply_button.click()
                 self.assertTrue(ctx.is_running())
                 self.assertEqual(worker.return_value.start.call_args.args[0]['brightness'], 85)
+                self.assertEqual(worker.return_value.start.call_args.args[0]['midtone_lift'], 35)
                 self.assertEqual(worker.return_value.start.call_args.args[0]['area'], 'Workstation')
                 page.stop_button.click()
                 worker.return_value.stop.assert_called_once()

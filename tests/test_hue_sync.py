@@ -19,7 +19,7 @@ if str(EXAMPLES) not in sys.path:
 
 from PyQt6.QtGui import QColor, QImage
 from _hue import HueSettings, load_hue, pair_entertainment, save_hue
-from _hue_sync import SyncProcess, channel_colors, normalized_settings, sample_regions
+from _hue_sync import SyncProcess, channel_colors, lift_region, normalized_settings, sample_regions
 from onigiri.extensions import ScenePayload, apply_scene, extension_status, list_extensions, stop_extensions
 
 HAS_STREAMING = importlib.util.find_spec("hue_entertainment") is not None
@@ -171,11 +171,13 @@ class SyncTests(unittest.TestCase):
         self.assertTrue(info.explicit_only)
         panel = PluginPanel(info)
         self.assertEqual(panel.values()["brightness"], 60)
-        panel.fill_from_scene(Scene(id="a", name="A", plugins={"hue_sync": {"area": "Desk", "brightness": 90, "whole_screen": True}}))
+        panel.fill_from_scene(Scene(id="a", name="A", plugins={"hue_sync": {"area": "Desk", "brightness": 90, "whole_screen": True, "midtone_lift": 45}}))
         self.assertEqual(panel.values()["area"], "Desk")
+        self.assertEqual(panel.values()["midtone_lift"], 45)
         self.assertTrue(panel.values()["whole_screen"])
         panel.fill_from_scene(Scene(id="b", name="B", plugins={"hue_sync": {}}))
         self.assertEqual(panel.values()["brightness"], 60)
+        self.assertEqual(panel.values()["midtone_lift"], 0)
         self.assertEqual(panel.values()["area"], "")
         self.assertFalse(panel.values()["whole_screen"])
 
@@ -335,3 +337,44 @@ class RestoreTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(RuntimeError, "restoration did not complete"):
             worker.stop()
         self.assertIsNone(worker.process)
+
+
+class MidtoneLiftTests(unittest.TestCase):
+    def test_disabled_lift_preserves_existing_colors_exactly(self):
+        color = (63.75, 31.875, 0)
+        self.assertEqual(lift_region(color, 0), color)
+        self.assertEqual(normalized_settings({})['midtone_lift'], 0)
+
+    def test_lift_brightens_midtones_without_changing_color_ratios(self):
+        original = (63.75, 31.875, 15.9375)
+        lifted = lift_region(original, 50)
+        self.assertEqual(lifted, (127.5, 63.75, 31.875))
+        self.assertGreater(lift_region(original, 100)[0], lifted[0])
+        self.assertLess(lifted[0], 255)
+
+    def test_black_white_and_saturated_colors_remain_anchored(self):
+        for amount in (0, 30, 50, 100):
+            self.assertEqual(lift_region((0,0,0), amount), (0,0,0))
+            self.assertEqual(lift_region((255,255,255), amount), (255,255,255))
+            self.assertEqual(lift_region((255,0,0), amount), (255,0,0))
+        self.assertEqual(normalized_settings({'midtone_lift':-1})['midtone_lift'], 0)
+        self.assertEqual(normalized_settings({'midtone_lift':999})['midtone_lift'], 100)
+        self.assertEqual(normalized_settings({'midtone_lift':'invalid'})['midtone_lift'], 0)
+
+    @unittest.skipUnless(HAS_STREAMING, 'optional sync dependency')
+    def test_lift_respects_brightness_cap_and_fades_to_black(self):
+        channel = SimpleNamespace(channel_id=0,position=(0,0,0))
+        original = ((63.75,31.875,0),)*3
+        settings = normalized_settings({'brightness':60,'smoothing':0,'midtone_lift':50})
+        command = channel_colors([channel],original,settings)[0]
+        self.assertEqual(command.red, round(127.5*257*0.6))
+        self.assertEqual(command.green, round(63.75*257*0.6))
+        previous = {}
+        bright = channel_colors([channel],((255,255,255),)*3,settings,previous)[0]
+        self.assertEqual(bright.red,round(65535*0.6))
+        settings['smoothing']=50
+        dark = channel_colors([channel],((0,0,0),)*3,settings,previous)[0]
+        self.assertLess(dark.red,bright.red)
+        settings['smoothing']=0
+        black = channel_colors([channel],((0,0,0),)*3,settings,previous)[0]
+        self.assertEqual((black.red,black.green,black.blue),(0,0,0))

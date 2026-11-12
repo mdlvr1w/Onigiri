@@ -25,6 +25,7 @@ def normalized_settings(settings):
         "area": str(settings.get("area") or "").strip(),
         "brightness": bounded(settings.get("brightness"), 1, 100, 60),
         "capture_fps": bounded(settings.get("capture_fps"), 5, 25, 15),
+        "midtone_lift": bounded(settings.get("midtone_lift"), 0, 100, 0),
         "smoothing": bounded(settings.get("smoothing"), 0, 95, 65),
         "whole_screen": bool(settings.get("whole_screen", False)),
     }
@@ -59,6 +60,17 @@ def sample_regions(image):
             average(max(left, right - third), right))
 
 
+def lift_region(rgb, amount):
+    """Lift the RGB peak with a gamma curve; preserve channel ratios and true black."""
+    amount = bounded(amount, 0, 100, 0)
+    peak = max(rgb)
+    if amount == 0 or peak <= 0:
+        return rgb
+    exponent = 1.0 / (1.0 + 2.0 * amount / 100.0)
+    gain = (255.0 * (peak / 255.0) ** exponent) / peak
+    return tuple(channel * gain for channel in rgb)
+
+
 def channel_colors(channels, regions, settings, previous=None):
     """Map entertainment-area horizontal positions to zones, with temporal smoothing."""
     from hue_entertainment import LightColorCommand
@@ -69,7 +81,8 @@ def channel_colors(channels, regions, settings, previous=None):
     for channel in channels:
         x = channel.position[0]
         region = 1 if settings["whole_screen"] else (0 if x < -0.15 else 2 if x > 0.15 else 1)
-        target = tuple(c * 257 * brightness for c in regions[region])
+        sampled = lift_region(regions[region], settings.get("midtone_lift", 0))
+        target = tuple(c * 257 * brightness for c in sampled)
         old = previous.get(channel.channel_id, target)
         rgb = tuple(max(0, min(65535, round(a + alpha * (b - a)))) for a, b in zip(old, target))
         previous[channel.channel_id] = rgb
