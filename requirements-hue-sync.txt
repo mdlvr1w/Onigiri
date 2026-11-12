@@ -1,0 +1,3 @@
+# Optional: only needed for examples/extensions/hue_sync.py.
+PyQt6>=6.7
+hue-entertainment==0.6.0

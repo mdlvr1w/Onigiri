@@ -1,0 +1,1 @@
+"""Qt interface for Onigiri."""

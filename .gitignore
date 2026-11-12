@@ -1,0 +1,37 @@
+# Python environments, caches and build output
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.tox/
+build/
+dist/
+*.egg-info/
+.coverage
+htmlcov/
+
+# Local editor/agent state
+.cursor/
+.codex/
+.idea/
+.vscode/
+.DS_Store
+
+# Local settings, credentials, runtime state and backups
+.env
+.env.*
+*.local
+onigiri.json
+hue.json
+extension-controls.json
+kwinrulesrc*
+.cache/
+*.log
+*.bak
+*.recovery-*
+*.onigiri-bak
+*.pem
+*.key
